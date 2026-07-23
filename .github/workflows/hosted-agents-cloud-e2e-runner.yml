@@ -371,12 +371,18 @@ jobs:
           # Inject the real RAI policy ARM ID into azure.yaml before init.
           # `azd ai agent init` adopts azure.yaml as the project manifest, so
           # the injected policy flows straight through to the deploy. Targets
-          # only the agent service's rai_policy entry that still carries the
+          # only the agent service's rai_policy entry that still carries a
           # documented placeholder, so it is a no-op for every sample that lacks
-          # it. Fails fast if the placeholder is present but RAI_POLICY_ID is
-          # unset/invalid, rather than letting the deploy fail later.
+          # it. Two placeholder forms are recognized: the canonical ARM-ID
+          # placeholder (content-safety sample) and the ${RAI_POLICY_ID} azd
+          # variable used by layered samples whose egress policy is normally
+          # provisioned by a Bicep layer — since CI runs with SKIP_PROVISION,
+          # that layer output never materializes, so we inject the real policy
+          # here instead. Fails fast if a placeholder is present but
+          # RAI_POLICY_ID is unset/invalid, rather than letting the deploy fail.
           RAI_PLACEHOLDER="/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.CognitiveServices/accounts/<account>/raiPolicies/<policy-name>"
-          if [ "$(RAI_PLACEHOLDER="$RAI_PLACEHOLDER" yq '[.services[] | select(.host == "azure.ai.agent") | .policies[]? | select(.type == "rai_policy") | select(.raiPolicyName == strenv(RAI_PLACEHOLDER))] | length' "$MANIFEST_SRC")" = "0" ]; then
+          RAI_PLACEHOLDER_VAR='${RAI_POLICY_ID}'
+          if [ "$(RAI_PLACEHOLDER="$RAI_PLACEHOLDER" RAI_PLACEHOLDER_VAR="$RAI_PLACEHOLDER_VAR" yq '[.services[] | select(.host == "azure.ai.agent") | .policies[]? | select(.type == "rai_policy") | select(.raiPolicyName == strenv(RAI_PLACEHOLDER) or .raiPolicyName == strenv(RAI_PLACEHOLDER_VAR))] | length' "$MANIFEST_SRC")" = "0" ]; then
             echo "No RAI policy placeholder in azure.yaml; skipping policy injection."
           else
             RAI_POLICY_ID="${RAI_POLICY_ID:-}"
