@@ -1,0 +1,7 @@
+name: uv and pyproject hosted agent
+description: A Responses hosted agent that uses uv, pyproject.toml, and a reproducible lockfile.
+
+build: "uv sync --frozen"
+validate: >-
+  uv run --no-sync python -m py_compile main.py &&
+  uv run --no-sync python -c "import azure.ai.agentserver.responses; import azure.ai.projects; import azure.identity"
