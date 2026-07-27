@@ -63,13 +63,31 @@ for original in "${originals[@]}"; do
   fi
   normalized_keys[$new_endpoint_key]=1
 
-  OLD_NAME="$original" NEW_NAME="$generated" \
+  # Every traversal below is guarded with `has(...)`. A bare `.a.b` or `.a[]?`
+  # on the left-hand side of a yq assignment *creates* the missing nodes, so an
+  # unguarded `.env.TOOLBOX_NAME?` stamps `env: {TOOLBOX_NAME: null}` onto every
+  # service. azure.ai.agents >= 1.0.0-beta.7 merges the service `env:` map over
+  # `environmentVariables:` (Azure/azure-dev#9149) and renders a null as "", so
+  # those stubs silently blanked TOOLBOX_NAME on every deployed agent.
+  #
+  # TOOLBOX_NAME is rewritten in two passes: an unconditional match on the
+  # pre-rename literal, and a `${TOOLBOX_NAME}` placeholder match restricted to
+  # services that actually consume this toolbox (`uses:`), so multi-toolbox
+  # samples cannot have their placeholder claimed by an unrelated toolbox.
+  OLD_NAME="$original" NEW_NAME="$generated" PLACEHOLDER='${TOOLBOX_NAME}' \
   OLD_ENDPOINT_KEY="$old_endpoint_key" NEW_ENDPOINT_KEY="$new_endpoint_key" \
     yq -i '
-      (.services[] | .uses[]? | select(. == strenv(OLD_NAME))) = strenv(NEW_NAME) |
-      (.services[] | .environmentVariables[]? |
+      (.services[] | select(has("uses")) | .uses[] |
+        select(. == strenv(OLD_NAME))) = strenv(NEW_NAME) |
+      (.services[] | select(has("environmentVariables")) | .environmentVariables[] |
         select(.name == "TOOLBOX_NAME" and .value == strenv(OLD_NAME)) | .value) = strenv(NEW_NAME) |
-      (.services[] | .env.TOOLBOX_NAME? | select(. == strenv(OLD_NAME))) = strenv(NEW_NAME) |
+      (.services[] | select(has("environmentVariables")) | select(has("uses")) |
+        select([.uses[] | select(. == strenv(NEW_NAME))] | length > 0) |
+        .environmentVariables[] |
+        select(.name == "TOOLBOX_NAME" and .value == strenv(PLACEHOLDER)) | .value) = strenv(NEW_NAME) |
+      (.services[] | select(has("env")) | select(.env | has("TOOLBOX_NAME")) |
+        .env.TOOLBOX_NAME |
+        select(. == strenv(OLD_NAME) or . == strenv(PLACEHOLDER))) = strenv(NEW_NAME) |
       (.. | select(tag == "!!str")) |=
         sub("\\$\\{" + strenv(OLD_ENDPOINT_KEY) + "\\}"; "$$" + "{" + strenv(NEW_ENDPOINT_KEY) + "}") |
       .services = (
@@ -119,5 +137,50 @@ while IFS= read -r old_key; do
     exit 1
   fi
 done < <(jq -r '.toolboxes[].old_endpoint_key' "$state_file")
+
+# Collects every declared environment value across the three shapes the agents
+# extension merges at deploy time: the `environmentVariables:` list, the
+# service-level `env:` map, and the deprecated `config: env:` map. Each shape is
+# queried separately on purpose — yq collapses a comma union to nothing when the
+# first term is empty under an `as $var` binding, which would make these checks
+# silently vacuous.
+env_entries() {
+  {
+    yq -o=json '[.services | to_entries[] as $service |
+      $service.value.environmentVariables[]? |
+      {"service": $service.key, "source": "environmentVariables", "key": .name, "value": .value}]' "$manifest"
+    yq -o=json '[.services | to_entries[] as $service |
+      $service.value.env? | select(. != null) | to_entries[] |
+      {"service": $service.key, "source": "env", "key": .key, "value": .value}]' "$manifest"
+    yq -o=json '[.services | to_entries[] as $service |
+      $service.value.config.env? | select(. != null) | to_entries[] |
+      {"service": $service.key, "source": "config.env", "key": .key, "value": .value}]' "$manifest"
+  } | jq -s 'add'
+}
+
+entries=$(env_entries)
+
+# No TOOLBOX_NAME may still point at a pre-rename toolbox name. Both rewrite
+# passes are silent no-ops when they match nothing, so without this check a
+# sample that changes how it declares TOOLBOX_NAME quietly deploys against a
+# shared toolbox owned by another matrix cell.
+stale=$(jq --slurpfile state "$state_file" '
+  ($state[0].toolboxes | map(.original_name)) as $originals |
+  map(select(.key == "TOOLBOX_NAME" and (.value as $v | $originals | index($v))))' <<< "$entries")
+if [ "$(jq 'length' <<< "$stale")" -ne 0 ]; then
+  echo "TOOLBOX_NAME still references a pre-rename toolbox after isolation:" >&2
+  jq . <<< "$stale" >&2
+  exit 1
+fi
+
+# A null/empty value silently becomes "" in the deployed agent, and since
+# azure.ai.agents 1.0.0-beta.7 the `env:`/`config: env:` maps are merged over
+# `environmentVariables:`, so a blank entry erases a correct value.
+blank=$(jq 'map(select(.value == null or .value == ""))' <<< "$entries")
+if [ "$(jq 'length' <<< "$blank")" -ne 0 ]; then
+  echo "Blank environment values would override the deployed agent configuration:" >&2
+  jq . <<< "$blank" >&2
+  exit 1
+fi
 
 jq . "$state_file"

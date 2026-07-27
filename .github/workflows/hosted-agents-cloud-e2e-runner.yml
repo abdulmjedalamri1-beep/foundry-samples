@@ -883,6 +883,73 @@ jobs:
             '{project_endpoint:$project_endpoint,toolboxes:$toolboxes}' > "$CI_TOOLBOX_DEPLOY_RESULT"
         timeout-minutes: 3
 
+      # ── Verify the deployed agent environment ───────────────────────
+      # azd merges several environment shapes from azure.yaml before deploy
+      # (`environmentVariables:`, the service `env:` map, the deprecated
+      # `config: env:` map) and precedence between them has changed across
+      # extension releases. A value that silently arrives empty produces a
+      # container that crashes or hangs minutes later with an unrelated-looking
+      # `session_not_ready`, so compare the deployed values against the manifest
+      # here, where the diagnosis is one line.
+      - name: Verify deployed agent environment
+        working-directory: /tmp/ci-${{ matrix.combo_id }}
+        env:
+          MATRIX_TOOLBOX_URL: ${{ matrix.toolbox_url }}
+        run: |
+          set -euo pipefail
+          AGENT_JSON=$(azd ai agent show --no-prompt --output json 2>/dev/null || true)
+          DEPLOYED_ENV=$(jq -c '.definition.environment_variables // {}' <<< "$AGENT_JSON" 2>/dev/null || echo '{}')
+          if [ -z "$DEPLOYED_ENV" ] || [ "$DEPLOYED_ENV" = "{}" ] || [ "$DEPLOYED_ENV" = "null" ]; then
+            echo "::warning::Could not read deployed environment variables from 'azd ai agent show'; skipping check"
+            exit 0
+          fi
+          echo "Deployed environment variables:"
+          jq . <<< "$DEPLOYED_ENV"
+
+          # An empty deployed value means something upstream (azd env
+          # resolution, an env-shape precedence change, a rewrite that silently
+          # matched nothing) dropped it. TOOLBOX_NAME is fatal at container
+          # startup, so fail on it; report the rest so they are visible without
+          # turning an unset optional secret into a red job.
+          blank=$(jq -r 'to_entries | map(select(.value == "")) | map(.key) | join(", ")' <<< "$DEPLOYED_ENV")
+          if [ -n "$blank" ]; then
+            echo "::warning::Deployed agent has empty environment variable(s): $blank"
+          fi
+          if jq -e 'has("TOOLBOX_NAME") and .TOOLBOX_NAME == ""' <<< "$DEPLOYED_ENV" >/dev/null; then
+            echo "::error::Deployed agent has an empty TOOLBOX_NAME; the agent cannot resolve its toolbox"
+            echo "azure.yaml agent env for comparison:"
+            yq '.services[] | select(.host == "azure.ai.agent") | {"environmentVariables": .environmentVariables, "env": .env}' azure.yaml || true
+            exit 1
+          fi
+
+          # When the sample owns a cell-scoped toolbox, the deployed TOOLBOX_NAME
+          # must be that toolbox — not a shared one from the committed manifest.
+          if [ -f "$CI_TOOLBOX_STATE_FILE" ] && [ "$(jq '.toolboxes | length' "$CI_TOOLBOX_STATE_FILE")" -gt 0 ]; then
+            # Mirror azd's precedence: the `env:` map overrides
+            # `environmentVariables:` (Azure/azure-dev#9149), which is how the
+            # per-cell toolbox override in this workflow takes effect.
+            EXPECTED_TOOLBOX=$(yq -r '[.services[] | select(.host == "azure.ai.agent") | select(has("env")) | .env.TOOLBOX_NAME] | .[0] // ""' azure.yaml)
+            if [ -z "$EXPECTED_TOOLBOX" ]; then
+              EXPECTED_TOOLBOX=$(yq -r '[.services[] | select(.host == "azure.ai.agent") | .environmentVariables[]? | select(.name == "TOOLBOX_NAME") | .value] | .[0] // ""' azure.yaml)
+            fi
+            DEPLOYED_TOOLBOX=$(jq -r '.TOOLBOX_NAME // ""' <<< "$DEPLOYED_ENV")
+            if [ -n "$EXPECTED_TOOLBOX" ] && [ "$EXPECTED_TOOLBOX" != "$DEPLOYED_TOOLBOX" ]; then
+              echo "::error::Deployed TOOLBOX_NAME does not match azure.yaml (expected '$EXPECTED_TOOLBOX', deployed '$DEPLOYED_TOOLBOX')"
+              exit 1
+            fi
+            # Cartesian toolbox cells (matrix.toolbox_url) deliberately point at
+            # a shared, externally provisioned toolbox, so ownership only applies
+            # to samples that declare their own toolbox service.
+            if [ -n "$DEPLOYED_TOOLBOX" ] && [ -z "${MATRIX_TOOLBOX_URL:-}" ] && \
+               [ "$(jq -r --arg name "$DEPLOYED_TOOLBOX" '[.toolboxes[] | select(.name == $name)] | length' "$CI_TOOLBOX_STATE_FILE")" -eq 0 ]; then
+              echo "::error::Deployed TOOLBOX_NAME '$DEPLOYED_TOOLBOX' is not a cell-owned toolbox for this job"
+              jq '.toolboxes' "$CI_TOOLBOX_STATE_FILE"
+              exit 1
+            fi
+            echo "✅ Deployed TOOLBOX_NAME: ${DEPLOYED_TOOLBOX:-(not declared)}"
+          fi
+        timeout-minutes: 3
+
       # ── Surface Foundry deploy error (best-effort diagnostic) ────────
       # azd's `[CodeError] Exception: For troubleshooting, see ...` line
       # is opaque — the real reason lives in the agent-version GET response

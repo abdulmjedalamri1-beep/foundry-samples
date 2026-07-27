@@ -95,6 +95,158 @@ assert_eq 2 "$(jq '.toolboxes | length' "$work/multiple-state.json")" "all toolb
 # shellcheck disable=SC2016 # $services is a yq variable, not a shell variable.
 assert_eq 0 "$(yq '[.services as $services | .services[] | .uses[]? | select($services[.] == null)] | length' "$work/multiple.yaml")" "multiple-toolbox rewrite left a dangling use"
 
+# Rewriting must never materialize keys a service did not declare. An
+# unguarded `.env.TOOLBOX_NAME?` on the left of a yq assignment creates
+# `env: {TOOLBOX_NAME: null}` on every service, and since azure.ai.agents
+# 1.0.0-beta.7 the `env:` map is merged over `environmentVariables:` with a
+# null rendered as "", which silently blanks TOOLBOX_NAME on deploy.
+assert_eq 0 "$(yq '[.services[] | select(has("env"))] | length' "$work/a.yaml")" "rewrite must not invent an env map"
+assert_eq 0 "$(yq '[.services[] | select(has("env"))] | length' "$work/multiple.yaml")" "rewrite must not invent an env map"
+assert_eq 0 "$(yq '[.services.ai-project | select(has("uses") or has("environmentVariables"))] | length' "$work/a.yaml")" "rewrite must not invent empty uses/environmentVariables"
+
+# A sample may point TOOLBOX_NAME at a ${TOOLBOX_NAME} placeholder instead of
+# the literal toolbox key. Consumers of a renamed toolbox must still be pinned
+# to their own cell-owned toolbox rather than relying on azd env resolution.
+cat > "$work/placeholder.yaml" <<'YAML'
+name: placeholder-toolbox
+services:
+  ai-project:
+    host: azure.ai.project
+  agent-tools:
+    host: azure.ai.toolbox
+    uses: [ai-project]
+  test-agent:
+    host: azure.ai.agent
+    uses: [ai-project, agent-tools]
+    environmentVariables:
+      - name: TOOLBOX_NAME
+        value: ${TOOLBOX_NAME}
+YAML
+"$prepare" "$work/placeholder.yaml" "$work/placeholder-state.json" 12345 1 placeholder >/dev/null
+placeholder_name=$(jq -r '.toolboxes[0].name' "$work/placeholder-state.json")
+assert_eq "$placeholder_name" "$(yq -r '.services.test-agent.environmentVariables[] | select(.name == "TOOLBOX_NAME") | .value' "$work/placeholder.yaml")" "placeholder TOOLBOX_NAME was not pinned to the cell toolbox"
+
+# Samples that consume an externally provisioned toolbox declare no toolbox
+# service; their placeholder must be left for the workflow to resolve.
+cat > "$work/external.yaml" <<'YAML'
+name: external-toolbox
+services:
+  ai-project:
+    host: azure.ai.project
+  test-agent:
+    host: azure.ai.agent
+    uses: [ai-project]
+    environmentVariables:
+      - name: TOOLBOX_NAME
+        value: ${TOOLBOX_NAME}
+YAML
+"$prepare" "$work/external.yaml" "$work/external-state.json" 12345 1 external >/dev/null
+assert_eq '${TOOLBOX_NAME}' "$(yq -r '.services.test-agent.environmentVariables[] | select(.name == "TOOLBOX_NAME") | .value' "$work/external.yaml")" "external-toolbox placeholder must be left alone"
+
+# Each agent in a multi-toolbox manifest must resolve its own placeholder from
+# its own uses edge, never another cell-mate's toolbox.
+cat > "$work/per-agent.yaml" <<'YAML'
+name: per-agent-toolboxes
+services:
+  ai-project:
+    host: azure.ai.project
+  first-tools:
+    host: azure.ai.toolbox
+    uses: [ai-project]
+  second-tools:
+    host: azure.ai.toolbox
+    uses: [ai-project]
+  first-agent:
+    host: azure.ai.agent
+    uses: [ai-project, first-tools]
+    environmentVariables:
+      - name: TOOLBOX_NAME
+        value: ${TOOLBOX_NAME}
+  second-agent:
+    host: azure.ai.agent
+    uses: [ai-project, second-tools]
+    environmentVariables:
+      - name: TOOLBOX_NAME
+        value: second-tools
+YAML
+"$prepare" "$work/per-agent.yaml" "$work/per-agent-state.json" 12345 1 per-agent >/dev/null
+first_name=$(jq -r '.toolboxes[] | select(.original_name == "first-tools") | .name' "$work/per-agent-state.json")
+second_name=$(jq -r '.toolboxes[] | select(.original_name == "second-tools") | .name' "$work/per-agent-state.json")
+assert_eq "$first_name" "$(yq -r '.services.first-agent.environmentVariables[] | select(.name == "TOOLBOX_NAME") | .value' "$work/per-agent.yaml")" "placeholder resolved to the wrong toolbox"
+assert_eq "$second_name" "$(yq -r '.services.second-agent.environmentVariables[] | select(.name == "TOOLBOX_NAME") | .value' "$work/per-agent.yaml")" "literal TOOLBOX_NAME resolved to the wrong toolbox"
+
+# The service-level `env:` map is the shape azd now prefers; a declared map must
+# be rewritten in place without disturbing unrelated keys.
+cat > "$work/env-map.yaml" <<'YAML'
+name: env-map-toolbox
+services:
+  ai-project:
+    host: azure.ai.project
+  agent-tools:
+    host: azure.ai.toolbox
+    uses: [ai-project]
+  test-agent:
+    host: azure.ai.agent
+    uses: [ai-project, agent-tools]
+    env:
+      TOOLBOX_NAME: agent-tools
+      UNRELATED: keep-me
+YAML
+"$prepare" "$work/env-map.yaml" "$work/env-map-state.json" 12345 1 env-map >/dev/null
+env_map_name=$(jq -r '.toolboxes[0].name' "$work/env-map-state.json")
+assert_eq "$env_map_name" "$(yq -r '.services.test-agent.env.TOOLBOX_NAME' "$work/env-map.yaml")" "env map TOOLBOX_NAME was not rewritten"
+assert_eq keep-me "$(yq -r '.services.test-agent.env.UNRELATED' "$work/env-map.yaml")" "unrelated env keys must be preserved"
+
+# A blank env value silently overrides the deployed agent configuration, so the
+# manifest must be rejected instead of shipped.
+cat > "$work/blank-env.yaml" <<'YAML'
+name: blank-env
+services:
+  ai-project:
+    host: azure.ai.project
+  agent-tools:
+    host: azure.ai.toolbox
+    uses: [ai-project]
+  test-agent:
+    host: azure.ai.agent
+    uses: [ai-project, agent-tools]
+    env:
+      TOOLBOX_NAME:
+    environmentVariables:
+      - name: TOOLBOX_NAME
+        value: agent-tools
+YAML
+set +e
+"$prepare" "$work/blank-env.yaml" "$work/blank-env-state.json" 12345 1 blank-env >"$work/blank-env.log" 2>&1
+blank_exit=$?
+set -e
+assert_eq 1 "$blank_exit" "a blank env value must fail the run"
+grep -q "Blank environment values" "$work/blank-env.log" || fail "blank env failure must name the problem"
+
+# A TOOLBOX_NAME declared in a shape the rewrite does not handle must fail loudly
+# rather than deploy against the shared, pre-rename toolbox.
+cat > "$work/stale-name.yaml" <<'YAML'
+name: stale-name
+services:
+  ai-project:
+    host: azure.ai.project
+  agent-tools:
+    host: azure.ai.toolbox
+    uses: [ai-project]
+  test-agent:
+    host: azure.ai.agent
+    uses: [ai-project, agent-tools]
+    config:
+      env:
+        TOOLBOX_NAME: agent-tools
+YAML
+set +e
+"$prepare" "$work/stale-name.yaml" "$work/stale-name-state.json" 12345 1 stale-name >"$work/stale-name.log" 2>&1
+stale_exit=$?
+set -e
+assert_eq 1 "$stale_exit" "an unrewritten TOOLBOX_NAME must fail the run"
+grep -q "still references a pre-rename toolbox" "$work/stale-name.log" || fail "stale TOOLBOX_NAME failure must name the problem"
+
 # Mock the azd toolbox CRUD surface so cleanup behavior is deterministic and
 # does not require Azure credentials.
 mkdir -p "$work/bin" "$work/times"
