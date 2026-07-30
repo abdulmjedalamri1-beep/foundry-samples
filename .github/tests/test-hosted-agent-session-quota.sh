@@ -49,14 +49,19 @@ HOSTED_AGENT_QUOTA_RETRY_DELAY_SECONDS=0
 [ "$(hosted_agent_quota_retry_delay)" = "0" ] || fail "delay override was not honored"
 
 runner="$repo_root/.github/workflows/hosted-agents-cloud-e2e-runner.yml"
+responses_helper="$repo_root/.github/scripts/invoke_hosted_agent_responses.py"
 grep -Fq 'CI_AGENT_SESSION_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.shard }}-${{ strategy.job-index }}' "$runner" \
   || fail "runner does not define one run-specific session per cell"
-[ "$(grep -Fc 'agent_session_id:$session_id' "$runner")" -eq 3 ] \
-  || fail "Responses invocation and guardrail requests must all use the cell session"
+response_session_uses=$((
+  $(grep -Fc 'agent_session_id:$session_id' "$runner") +
+  $(grep -Fc '"agent_session_id": env["CI_AGENT_SESSION_ID"]' "$responses_helper")
+))
+[ "$response_session_uses" -eq 4 ] \
+  || fail "Responses invocation, approval continuation, and guardrails must use the cell session"
 grep -Fq 'azd ai agent sessions create' "$runner" \
   || fail "runner does not explicitly create the cell session"
-[ "$(grep -Fc -- '--session-id "$CI_AGENT_SESSION_ID"' "$runner")" -eq 4 ] \
-  || fail "session create, invocation, and both monitoring calls must use the cell session"
+[ "$(grep -Fc -- '--session-id "$CI_AGENT_SESSION_ID"' "$runner")" -eq 6 ] \
+  || fail "session create, invocation, files, traces, and both monitoring calls must use the cell session"
 grep -Fq 'azd ai agent sessions delete "$CI_AGENT_SESSION_ID"' "$runner" \
   || fail "cleanup does not delete the cell session"
 if grep -Fq 'SID=$(grep' "$runner"; then

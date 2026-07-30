@@ -158,6 +158,10 @@ jobs:
         # microsoft.foundry`). Install that extension so `azd ai agent init -m
         # azure.yaml` adopts the project manifest.
         run: azd ext install microsoft.foundry
+
+      - name: Install hosted-agent test-spec dependency
+        run: python3 -m pip install --disable-pip-version-check --quiet "PyYAML==6.0.2"
+
         # Sanity-check: fail fast if the installed build doesn't expose
         # the flags the workflow assumes are present.
       - name: Verify azd ext supports --deploy-mode
@@ -1094,14 +1098,9 @@ jobs:
         timeout-minutes: 15
 
       # ── Validate: invoke (unified, multi-turn) ──────────────────────
-      # Both protocols use -p <protocol> with a payload file.
-      # Payload file (test-payload.txt) lives under
-      # internal/tools/samples-hosted-agents/<lang>/<protocol>/<sample-name>/
-      # and contains one prompt per line. Each line may be a plain string or a
-      # JSON object — the line is passed through to `azd ai agent invoke`
-      # verbatim. Each line is treated as a separate turn. If no payload file
-      # is present for the sample, a default 3-turn payload is generated
-      # automatically.
+      # Discovery order is test-spec.yml, legacy test-payload.txt, then the
+      # generated default payload. A spec carries registration metadata,
+      # ordered turns, applicability conditions, and semantic assertions.
       - name: Invoke ${{ matrix.name }} agent
         working-directory: /tmp/ci-${{ matrix.combo_id }}
         env:
@@ -1111,44 +1110,66 @@ jobs:
           source "${{ github.workspace }}/.github/scripts/hosted-agent-retry.sh"
           PROTOCOL="${{ matrix.protocol }}"
           SAMPLE_DIR="${{ github.workspace }}/${{ matrix.path }}"
-          # Priority for the prompt:
-          #   1. matrix.toolbox_query (per-toolbox question from TOOLBOX_ENDPOINT) — toolbox jobs only
-          #   2. Per-sample payload files in internal/tools/samples-hosted-agents/<lang>/<protocol>/<sample-dir>/test-payload.txt
-          #   3. Default 3-turn payload
-          
-          # Check for per-sample payload file (supports both hosted-agents and toolbox samples)
           SAMPLE_LANG="$(echo "${{ matrix.path }}" | awk -F/ '{print $2}')"
           SAMPLE_DIR_NAME="$(basename "${{ matrix.path }}")"
-          PAYLOAD_FILE="${{ github.workspace }}/internal/tools/samples-hosted-agents/$SAMPLE_LANG/$PROTOCOL/$SAMPLE_DIR_NAME/test-payload.txt"
-          
-          if [ -n "$TOOLBOX_QUERY" ] && [ "${{ matrix.is_toolbox }}" = "true" ]; then
-            # Toolbox samples: use the provided query
-            echo "Using toolbox-specific query: $TOOLBOX_QUERY"
-            if [ "$PROTOCOL" = "invocations" ]; then
-              PAYLOAD_FILE="/tmp/toolbox-query-${{ matrix.combo_id }}.json"
-              # -c emits compact (single-line) JSON. The invoke loop reads
-              # the payload file line-by-line and treats each non-empty line
-              # as a separate turn, so multi-line JSON would be split into
-              # broken fragments.
-              jq -nc --arg q "$TOOLBOX_QUERY" '{query:$q}' > "$PAYLOAD_FILE"
-            else
+          FIXTURE_DIR="${{ github.workspace }}/internal/tools/samples-hosted-agents/$SAMPLE_LANG/$PROTOCOL/$SAMPLE_DIR_NAME"
+          SPEC_FILE="$FIXTURE_DIR/test-spec.yml"
+          PAYLOAD_FILE="$FIXTURE_DIR/test-payload.txt"
+          PLAN_FILE="/tmp/agent-test-plan-${{ matrix.combo_id }}.json"
+          TURN_PLAN="/tmp/agent-turn-plan-${{ matrix.combo_id }}.jsonl"
+          EVIDENCE_DIR="/tmp/agent-test-evidence-${{ matrix.combo_id }}"
+          mkdir -p "$EVIDENCE_DIR"
+          : > "$TURN_PLAN"
+
+          if [ -f "$SPEC_FILE" ]; then
+            echo "Using hosted-agent test spec: $SPEC_FILE"
+            if ! python3 "${{ github.workspace }}/.github/scripts/hosted_agent_test_spec.py" plan \
+                --spec "$SPEC_FILE" \
+                --toolbox-label "${{ matrix.toolbox_label }}" \
+                --toolbox-query "$TOOLBOX_QUERY" \
+                --protocol "$PROTOCOL" \
+                --output "$PLAN_FILE"; then
+              echo "::error::Could not build the hosted-agent test execution plan"
+              exit 1
+            fi
+            if ! jq -c '.tests[].turns[]' "$PLAN_FILE" > "$TURN_PLAN"; then
+              echo "::error::Could not resolve turns from $PLAN_FILE"
+              exit 1
+            fi
+            # A nonmatching condition is not_applicable. Do not silently apply
+            # a matrix toolbox query to some other declared test.
+          else
+            # Legacy migration path: a toolbox matrix query replaces the
+            # line-oriented payload; otherwise use test-payload.txt or defaults.
+            if [ -n "$TOOLBOX_QUERY" ] && [ "${{ matrix.is_toolbox }}" = "true" ]; then
+              echo "Using legacy toolbox-specific query: $TOOLBOX_QUERY"
               PAYLOAD_FILE="/tmp/toolbox-query-${{ matrix.combo_id }}.txt"
-              echo "$TOOLBOX_QUERY" > "$PAYLOAD_FILE"
+              if [ "$PROTOCOL" = "invocations" ]; then
+                jq -nc --arg q "$TOOLBOX_QUERY" '{query:$q}' > "$PAYLOAD_FILE"
+              else
+                printf '%s\n' "$TOOLBOX_QUERY" > "$PAYLOAD_FILE"
+              fi
+            elif [ ! -f "$PAYLOAD_FILE" ]; then
+              echo "No test spec or legacy payload found — generating default 3-turn payload"
+              PAYLOAD_FILE="/tmp/default-payload-${{ matrix.combo_id }}.txt"
+              if [ "$PROTOCOL" = "invocations" ]; then
+                for i in 1 2 3; do echo '{"query":"analyze dataset"}' >> "$PAYLOAD_FILE"; done
+              else
+                for i in 1 2 3; do echo "Hello from CI" >> "$PAYLOAD_FILE"; done
+              fi
             fi
-          elif [ ! -f "$PAYLOAD_FILE" ]; then
-            # No per-sample payload file and no toolbox query: generate default 3-turn payload
-            echo "No payload file found — generating default 3-turn payload"
-            PAYLOAD_FILE="/tmp/default-payload-${{ matrix.combo_id }}.txt"
-            if [ "$PROTOCOL" = "invocations" ]; then
-              for i in 1 2 3; do echo '{"query": "analyze dataset"}' >> "$PAYLOAD_FILE"; done
-            else
-              for i in 1 2 3; do echo "Hello from CI" >> "$PAYLOAD_FILE"; done
-            fi
+            legacy_turn=0
+            while IFS= read -r legacy_line || [ -n "$legacy_line" ]; do
+              [ -z "$legacy_line" ] && continue
+              legacy_turn=$((legacy_turn + 1))
+              jq -nc --argjson turn "$legacy_turn" --arg input "$legacy_line" \
+                '{turn:$turn,global_turn:$turn,serialized_input:$input,assertions:[]}' \
+                >> "$TURN_PLAN"
+            done < "$PAYLOAD_FILE"
           fi
 
-          echo "Payload file: $PAYLOAD_FILE"
-          echo "Contents:"
-          cat "$PAYLOAD_FILE"
+          echo "Resolved turn plan:"
+          jq . "$TURN_PLAN"
           echo ""
 
           # For the responses protocol we POST directly to the agent's
@@ -1183,18 +1204,23 @@ jobs:
             echo "Agent responses endpoint: $AGENT_RESPONSES_URL"
           fi
 
-          # Invoke once per non-empty line (= one turn per line).
+          # Invoke each resolved turn in order. The final retry attempt is copied
+          # into a stable evidence directory for semantic evaluation and upload.
           turn=0
           overall_exit=0
           quota_retries=0
-          while IFS= read -r line || [ -n "$line" ]; do
-            [ -z "$line" ] && continue
-            turn=$((turn + 1))
+          while IFS= read -r turn_record || [ -n "$turn_record" ]; do
+            [ -z "$turn_record" ] && continue
+            turn=$(jq -r '.global_turn' <<< "$turn_record")
+            line=$(jq -r '.serialized_input' <<< "$turn_record")
             echo "─── Turn $turn ───"
             echo "Prompt: $line"
+            printf '%s\n' "$line" > "$EVIDENCE_DIR/turn-$turn-input.txt"
 
             TURN_FILE="/tmp/turn-${{ matrix.combo_id }}-${turn}"
-            echo "$line" > "$TURN_FILE"
+            TURN_RECORD_FILE="/tmp/turn-record-${{ matrix.combo_id }}-${turn}.json"
+            printf '%s\n' "$line" > "$TURN_FILE"
+            printf '%s\n' "$turn_record" > "$TURN_RECORD_FILE"
 
             request_attempt=0
             transient_attempt=1
@@ -1207,43 +1233,35 @@ jobs:
             turn_exit=1
             while : ; do
               request_attempt=$((request_attempt + 1))
+              approval_terminal_error=false
+              approval_error=""
+              approval_events='[]'
+              approval_pending_count=0
+              approval_auto=false
               if [ "$PROTOCOL" = "responses" ]; then
-                # Samples opt out of response storage, but all turns and retries
-                # intentionally share this cell's caller-owned hosted session.
-                jq -n --arg input "$line" --arg session_id "$CI_AGENT_SESSION_ID" \
-                  '{input:$input, stream:false, store:false, agent_session_id:$session_id}' \
-                  > /tmp/req-${turn}.json
-                http_code=$(curl -sS -D /tmp/invoke-headers-${turn}.txt \
-                  -o /tmp/invoke-raw-${turn}.json -w "%{http_code}" \
-                  -X POST "$AGENT_RESPONSES_URL" \
-                  -H "Authorization: Bearer $AAD_TOKEN" \
-                  -H "Content-Type: application/json" \
-                  -H "x-agent-version-override: $DEPLOYED_AGENT_VERSION" \
-                  --max-time 300 \
-                  --data @/tmp/req-${turn}.json)
-                # Extract assistant text & conversation id; fall back to raw JSON.
-                if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
-                  ASSISTANT_TEXT=$(jq -r '
-                    [.output[]? | select(.type=="message") | .content[]? | select(.type=="output_text") | .text]
-                    | join("\n")' /tmp/invoke-raw-${turn}.json 2>/dev/null)
-                  {
-                    echo "HTTP $http_code"
-                    echo "--- Agent response ---"
-                    if [ -n "$ASSISTANT_TEXT" ] && [ "$ASSISTANT_TEXT" != "null" ]; then
-                      echo "$ASSISTANT_TEXT"
-                    else
-                      echo "(no assistant text in response — full body:)"
-                      cat /tmp/invoke-raw-${turn}.json
-                    fi
-                    echo "--- end response ---"
-                  } > /tmp/invoke-out-${turn}.txt
-                  turn_exit=0
-                else
-                  {
-                    echo "HTTP $http_code"
-                    cat /tmp/invoke-raw-${turn}.json
-                  } > /tmp/invoke-out-${turn}.txt
+                result_file="/tmp/invoke-result-${turn}.json"
+                rm -f "$result_file"
+                AGENT_RESPONSES_URL="$AGENT_RESPONSES_URL" \
+                AAD_TOKEN="$AAD_TOKEN" \
+                DEPLOYED_AGENT_VERSION="$DEPLOYED_AGENT_VERSION" \
+                CI_AGENT_SESSION_ID="$CI_AGENT_SESSION_ID" \
+                  python3 "${{ github.workspace }}/.github/scripts/invoke_hosted_agent_responses.py" \
+                    "$turn" "$TURN_FILE" "$TURN_RECORD_FILE" "$EVIDENCE_DIR" "$request_attempt"
+                if [ ! -s "$result_file" ] || ! jq -e 'type == "object"' "$result_file" >/dev/null; then
+                  approval_terminal_error=true
+                  approval_error="Responses helper did not produce a valid result"
                   turn_exit=1
+                  http_code=""
+                  echo "::error::$approval_error"
+                  printf '%s\n' "$approval_error" > "/tmp/invoke-out-${turn}.txt"
+                else
+                  turn_exit=$(jq -r '.turn_exit' "$result_file")
+                  http_code=$(jq -r '.http_code' "$result_file")
+                  approval_terminal_error=$(jq -r '.approval_terminal_error' "$result_file")
+                  approval_error=$(jq -r '.approval_error' "$result_file")
+                  approval_events=$(jq -c '.approval_events' "$result_file")
+                  approval_pending_count=$(jq -r '.approval_pending_count' "$result_file")
+                  approval_auto=$(jq -r '.approval_auto' "$result_file")
                 fi
               else
                 # The explicit create step already bound this session to the
@@ -1252,6 +1270,11 @@ jobs:
                   --session-id "$CI_AGENT_SESSION_ID" --no-prompt \
                   > /tmp/invoke-out-${turn}.txt 2>&1
                 turn_exit=$?
+              fi
+              if [ "$approval_terminal_error" = "true" ]; then
+                # Policy and protocol errors are deterministic and must never
+                # enter quota, throttle, readiness, or semantic retry paths.
+                break
               fi
               quota_error_files=(/tmp/invoke-out-${turn}.txt)
               if [ "$PROTOCOL" = "responses" ]; then
@@ -1325,7 +1348,7 @@ jobs:
               # MCP gateway's auth cache. The HTTP/2 "stream ... CANCEL"
               # signal is a transient server-side stream reset (observed
               # mid-invoke on the invocations protocol) and is also retried.
-              if grep -qiE "session_not_ready|status[ _]?code[: ]+424|HTTP 424|readiness|PermissionDenied|Principal does not have access|still being provisioned|version is still being|\"code\"[[:space:]]*:[[:space:]]*\"server_error\"|internal server error occurred|401 Unauthorized|stream error.*CANCEL|received from peer|connection reset by peer|EOF while reading response" /tmp/invoke-out-${turn}.txt; then
+              if grep -qiE "session_not_ready|status[ _]?code[: ]+424|HTTP 424|readiness|PermissionDenied|Principal does not have access|still being provisioned|version is still being|\"status\"[[:space:]]*:[[:space:]]*\"failed\"|\"code\"[[:space:]]*:[[:space:]]*\"server_error\"|invalid_payload|internal server error occurred|401 Unauthorized|stream error.*CANCEL|received from peer|connection reset by peer|EOF while reading response" /tmp/invoke-out-${turn}.txt; then
                 echo "::warning::Turn $turn transient attempt $transient_attempt hit transient error; retrying in ${backoff}s"
                 sleep "$backoff"
                 backoff=$((backoff * 2))
@@ -1334,10 +1357,55 @@ jobs:
               fi
               break
             done
-            cat /tmp/invoke-out-${turn}.txt
+
+            # Persist only the final retry attempt as assertion evidence.
+            cp "/tmp/invoke-out-${turn}.txt" "$EVIDENCE_DIR/turn-$turn-invoke.txt"
+            if [ "$PROTOCOL" = "responses" ]; then
+              cp "$EVIDENCE_DIR/turn-$turn-attempt-$request_attempt-approval-step-0-request.json" \
+                "$EVIDENCE_DIR/turn-$turn-request.json"
+              cp "/tmp/invoke-headers-${turn}.txt" "$EVIDENCE_DIR/turn-$turn-headers.txt"
+              cp "/tmp/invoke-raw-${turn}.json" "$EVIDENCE_DIR/turn-$turn-raw.txt"
+              cp "/tmp/invoke-response-${turn}.txt" "$EVIDENCE_DIR/turn-$turn-assistant-text.txt"
+            else
+              cp "/tmp/invoke-out-${turn}.txt" "$EVIDENCE_DIR/turn-$turn-raw.txt"
+            fi
+            jq -n --argjson turn "$turn" --argjson exit_code "$turn_exit" \
+              --argjson attempts "$request_attempt" --arg protocol "$PROTOCOL" \
+              --arg http_status "${http_code:-}" \
+              --argjson approval_auto "$approval_auto" \
+              --argjson pending_approvals "$approval_pending_count" \
+              --argjson approval_events "$approval_events" \
+              --arg approval_error "$approval_error" \
+              '{turn:$turn,exit_code:$exit_code,http_status:(if $http_status == "" then null else ($http_status | tonumber) end),final_attempt:$attempts,protocol:$protocol,mcp_approvals:{automatic:$approval_auto,pending:$pending_approvals,error:(if $approval_error == "" then null else $approval_error end),steps:$approval_events}}' \
+              > "$EVIDENCE_DIR/turn-$turn-status.json"
+
+            # Collect only listings required by this turn's exact file contracts.
+            while IFS=$'\t' read -r assertion_index contract_path; do
+              [ -z "$contract_path" ] && continue
+              parent_path=$(dirname "$contract_path")
+              listing="$EVIDENCE_DIR/turn-$turn-session-files-$assertion_index.json"
+              if ! azd ai agent files list "$parent_path" \
+                  --session-id "$CI_AGENT_SESSION_ID" --output json --no-prompt > "$listing"; then
+                echo "{}" > "$listing"
+                echo "::warning::Could not list session directory $parent_path"
+              fi
+            done < <(jq -r '
+              .assertions | to_entries[] |
+              select(.value.source == "session_files") |
+              [(.key + 1), .value.path] | @tsv
+            ' <<< "$turn_record")
+
+            cat "/tmp/invoke-out-${turn}.txt"
             [ $turn_exit -ne 0 ] && overall_exit=$turn_exit
             [ "$model_throttle_exhausted" = "true" ] && break
-          done < "$PAYLOAD_FILE"
+          done < "$TURN_PLAN"
+
+          if [ "$turn" -eq 0 ]; then
+            echo "No tests apply to this matrix cell; semantic result is not_applicable."
+            mkdir -p /tmp/agent-response
+            echo "not_applicable" > /tmp/agent-response/response.txt
+            exit 0
+          fi
 
           echo ""
           echo "┌──────────────────────────────────────────┐"
@@ -1570,36 +1638,42 @@ jobs:
           set -o pipefail
           sample_lang=$(echo "${{ matrix.path }}" | awk -F/ '{print $2}')
           sample_name=$(basename "${{ matrix.path }}")
-          assertions_file="${{ github.workspace }}/internal/tools/samples-hosted-agents/$sample_lang/${{ matrix.protocol }}/$sample_name/test-assertions.yml"
-          report_file="/tmp/agent-assertions-${{ matrix.combo_id }}.json"
-          resolved_file="/tmp/resolved-assertions-${{ matrix.combo_id }}.json"
+          fixture_dir="${{ github.workspace }}/internal/tools/samples-hosted-agents/$sample_lang/${{ matrix.protocol }}/$sample_name"
+          spec_file="$fixture_dir/test-spec.yml"
+          plan_file="/tmp/agent-test-plan-${{ matrix.combo_id }}.json"
+          report_file="/tmp/agent-test-report-${{ matrix.combo_id }}.json"
+          resolved_file="/tmp/resolved-test-spec-${{ matrix.combo_id }}.json"
+          evidence_dir="/tmp/agent-test-evidence-${{ matrix.combo_id }}"
           console_log="/tmp/agent-console-${{ matrix.combo_id }}.txt"
           system_log="/tmp/agent-system-${{ matrix.combo_id }}.txt"
           evidence_log="/tmp/agent-log-evidence-${{ matrix.combo_id }}.txt"
+          trace_file="/tmp/agent-traces-${{ matrix.combo_id }}.json"
 
-          has_assertions=false
-          if [ -f "$assertions_file" ]; then
-            yq -o=json "$assertions_file" > "$resolved_file"
-            has_assertions=true
+          has_spec=false
+          needs_trace=false
+          if [ -f "$spec_file" ] && [ -f "$plan_file" ]; then
+            if ! python3 "${{ github.workspace }}/.github/scripts/hosted_agent_test_spec.py" validate \
+                --spec "$spec_file" --output "$resolved_file"; then
+              echo "::error::Hosted-agent test spec became invalid after invocation planning"
+              exit 1
+            fi
+            has_spec=true
+            needs_trace=$(jq -r '[.tests[] | select(.status == "applicable") | .assertions[]? | select(.source == "trace")] | length > 0' "$plan_file")
           else
-            echo "No test-assertions.yml for this sample; existing smoke validation applies."
+            echo "No applicable test-spec.yml execution plan; legacy smoke validation applies."
           fi
 
-          # The hosted log service can surface application stderr through either
-          # monitor stream, and fresh session logs are eventually consistent.
-          # Fetch both streams into one evidence snapshot. Retry only when every
-          # failed assertion depends on delayed log evidence; response failures
-          # are semantic and are never retried.
-          collect_session_logs() {
+          # Application stderr can surface through either monitor stream. Logs
+          # and traces are eventually consistent, so only those evidence sources
+          # receive bounded retrieval retries.
+          collect_delayed_evidence() {
             local attempt="$1"
             echo "Using session: $CI_AGENT_SESSION_ID"
-            echo ""
             echo "=== Console Logs (attempt $attempt) ==="
             if ! azd ai agent monitor --type console --session-id "$CI_AGENT_SESSION_ID" --tail 300 --no-prompt 2>&1 \
                 | tee "$console_log"; then
               echo "(no console logs available)"
             fi
-            echo ""
             echo "=== System Event Logs (attempt $attempt) ==="
             if ! azd ai agent monitor --type system --session-id "$CI_AGENT_SESSION_ID" --tail 300 --no-prompt 2>&1 \
                 | tee "$system_log"; then
@@ -1609,63 +1683,56 @@ jobs:
             for log_file in "$console_log" "$system_log"; do
               [ -f "$log_file" ] && cat "$log_file" >> "$evidence_log"
             done
+
+            if [ "$needs_trace" = "true" ]; then
+              resource_group=$(azd env get-value AZURE_RESOURCE_GROUP 2>/dev/null || true)
+              python3 "${{ github.workspace }}/.github/scripts/collect-hosted-agent-traces.py" \
+                --resource-group "$resource_group" \
+                --agent-name "$AGENT_NAME" \
+                --session-id "$CI_AGENT_SESSION_ID" \
+                --output "$trace_file" || true
+            fi
           }
 
-          max_evidence_attempts=3
+          max_evidence_attempts=4
           backoff=30
           attempt=1
           while [ "$attempt" -le "$max_evidence_attempts" ]; do
-            collect_session_logs "$attempt"
+            collect_delayed_evidence "$attempt"
 
-            if [ "$has_assertions" != "true" ]; then
+            if [ "$has_spec" != "true" ]; then
               echo "✅ Agent monitoring check completed"
               exit 0
             fi
 
-            validator_args=(
-              --assertions-json "$resolved_file"
-              --toolbox-label "$TOOLBOX_LABEL"
-              --response-template '/tmp/invoke-out-{turn}.txt'
-              --console-log "$evidence_log"
-              --report "$report_file"
-            )
-            [ "$attempt" -lt "$max_evidence_attempts" ] && validator_args+=(--no-annotations)
-
             set +e
-            python3 "${{ github.workspace }}/.github/scripts/validate-hosted-agent-assertions.py" \
-              "${validator_args[@]}"
+            python3 "${{ github.workspace }}/.github/scripts/hosted_agent_test_spec.py" evaluate \
+              --plan "$plan_file" \
+              --evidence-dir "$evidence_dir" \
+              --console-log "$evidence_log" \
+              --trace-file "$trace_file" \
+              --report "$report_file"
             validation_exit=$?
             set -e
             [ "$validation_exit" -eq 0 ] && exit 0
 
             retryable=$(jq -r '
-              .status == "failed" and
-              ([.assertions[] | select(.status == "failed")] | length > 0) and
-              ([.assertions[] | select(.status == "failed") | .source] | all(. == "console_log"))
+              [.tests[].assertions[]? | select(.status == "failed" or .status == "error")] as $failures |
+              ($failures | length > 0) and
+              ($failures | all(.source == "console_log" or .source == "trace"))
             ' "$report_file")
-            if [ "$retryable" != "true" ]; then
-              # Re-run once with annotations enabled so the semantic/schema
-              # failure is visible in the Actions summary.
-              python3 "${{ github.workspace }}/.github/scripts/validate-hosted-agent-assertions.py" \
-                --assertions-json "$resolved_file" \
-                --toolbox-label "$TOOLBOX_LABEL" \
-                --response-template '/tmp/invoke-out-{turn}.txt' \
-                --console-log "$evidence_log" \
-                --report "$report_file"
-              exit $?
-            fi
-
-            if [ "$attempt" -eq "$max_evidence_attempts" ]; then
+            if [ "$retryable" != "true" ] || [ "$attempt" -eq "$max_evidence_attempts" ]; then
+              echo "::error::Hosted-agent feature assertions failed; see $report_file"
               exit "$validation_exit"
             fi
 
-            echo "Console-log evidence is not available yet (attempt $attempt/$max_evidence_attempts)."
-            echo "Waiting ${backoff}s before refreshing the bounded log snapshots."
+            echo "Delayed assertion evidence is unavailable (attempt $attempt/$max_evidence_attempts)."
+            echo "Waiting ${backoff}s before refreshing logs and traces."
             sleep "$backoff"
             backoff=$((backoff * 2))
             attempt=$((attempt + 1))
           done
-        timeout-minutes: 5
+        timeout-minutes: 8
 
       # ── Cleanup: delete session ───────────────────────────────────────────
       - name: Delete agent session
@@ -1725,8 +1792,11 @@ jobs:
             /tmp/agent-console-${{ matrix.combo_id }}.txt
             /tmp/agent-system-${{ matrix.combo_id }}.txt
             /tmp/agent-log-evidence-${{ matrix.combo_id }}.txt
-            /tmp/resolved-assertions-${{ matrix.combo_id }}.json
-            /tmp/agent-assertions-${{ matrix.combo_id }}.json
+            /tmp/agent-test-plan-${{ matrix.combo_id }}.json
+            /tmp/resolved-test-spec-${{ matrix.combo_id }}.json
+            /tmp/agent-test-report-${{ matrix.combo_id }}.json
+            /tmp/agent-traces-${{ matrix.combo_id }}.json
+            /tmp/agent-test-evidence-${{ matrix.combo_id }}/
             /tmp/result.txt
             /tmp/agent-response/response.txt
             /tmp/voicelive-smoke-test.log
@@ -1734,6 +1804,7 @@ jobs:
             ${{ env.CI_TOOLBOX_DEPLOY_RESULT }}
             ${{ env.CI_TOOLBOX_CLEANUP_RESULT }}
           if-no-files-found: ignore
+          retention-days: 14
 
       # ── Publish validation commit status (D5 canary) ─────────────────
       # Posts a GitHub commit status under the External Validation Contract

@@ -1,3 +1,0 @@
-{"query":"trigger"}
-[{"id":"ci-validation","eventType":"Microsoft.EventGrid.SubscriptionValidationEvent","subject":"","eventTime":"2026-01-01T00:00:00Z","dataVersion":"1","data":{"validationCode":"ci-handshake-code"}}]
-{"query":"ping"}

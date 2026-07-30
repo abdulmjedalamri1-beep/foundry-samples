@@ -28,9 +28,12 @@ on:
       - ".github/scripts/prepare-hosted-agent-ci-toolboxes.sh"
       - ".github/scripts/cleanup-hosted-agent-ci-toolboxes.sh"
       - ".github/scripts/hosted-agent-retry.sh"
-      - ".github/scripts/validate-hosted-agent-assertions.py"
+      - ".github/scripts/hosted_agent_test_spec.py"
+      - ".github/scripts/invoke_hosted_agent_responses.py"
+      - ".github/scripts/collect-hosted-agent-traces.py"
       - ".github/tests/test-hosted-agent-ci-toolboxes.sh"
       - ".github/tests/test-hosted-agent-session-quota.sh"
+      - ".github/tests/test_hosted_agent_test_spec.py"
       - "internal/tools/samples-hosted-agents/**"
   push:
     branches: [ main ]
@@ -42,9 +45,12 @@ on:
       - ".github/scripts/prepare-hosted-agent-ci-toolboxes.sh"
       - ".github/scripts/cleanup-hosted-agent-ci-toolboxes.sh"
       - ".github/scripts/hosted-agent-retry.sh"
-      - ".github/scripts/validate-hosted-agent-assertions.py"
+      - ".github/scripts/hosted_agent_test_spec.py"
+      - ".github/scripts/invoke_hosted_agent_responses.py"
+      - ".github/scripts/collect-hosted-agent-traces.py"
       - ".github/tests/test-hosted-agent-ci-toolboxes.sh"
       - ".github/tests/test-hosted-agent-session-quota.sh"
+      - ".github/tests/test_hosted_agent_test_spec.py"
       - "internal/tools/samples-hosted-agents/**"
   schedule:
     # Daily regression run at 08:00 UTC against main.
@@ -95,6 +101,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Needed to get diff for PRs
+
+      - name: Install hosted-agent test-spec dependency
+        run: python3 -m pip install --disable-pip-version-check --quiet "PyYAML==6.0.2"
+
+      - name: Test and validate hosted-agent test specs
+        run: |
+          python3 .github/tests/test_hosted_agent_test_spec.py
+          while IFS= read -r spec; do
+            protocol=$(basename "$(dirname "$(dirname "$spec")")")
+            python3 .github/scripts/hosted_agent_test_spec.py validate --spec "$spec"
+            python3 .github/scripts/hosted_agent_test_spec.py plan \
+              --spec "$spec" --protocol "$protocol" \
+              --output /tmp/hosted-agent-test-spec-plan.json
+          done < <(find internal/tools/samples-hosted-agents -name test-spec.yml -type f | sort)
+          if find internal/tools/samples-hosted-agents -name test-assertions.yml -type f | grep -q .; then
+            echo "::error::Legacy test-assertions.yml files must be migrated to test-spec.yml"
+            exit 1
+          fi
 
       - name: Test hosted-agent CI toolbox lifecycle scripts
         run: .github/tests/test-hosted-agent-ci-toolboxes.sh
@@ -396,7 +420,7 @@ jobs:
             # changed-sample filter emitted an empty matrix, so runner changes
             # were never validated before merge.
             test_all="false"
-            if echo "$changed_files" | grep -qE '^\.github/(workflows/hosted-agents-cloud-e2e(-runner)?\.yml|scripts/((prepare|cleanup)-hosted-agent-ci-toolboxes|hosted-agent-session-quota)\.sh|tests/test-hosted-agent-(ci-toolboxes|session-quota)\.sh)$'; then
+            if echo "$changed_files" | grep -qE '^\.github/(workflows/hosted-agents-cloud-e2e(-runner)?\.yml|scripts/((prepare|cleanup)-hosted-agent-ci-toolboxes|hosted-agent-retry)\.sh|scripts/(hosted_agent_test_spec|invoke_hosted_agent_responses|collect-hosted-agent-traces)\.py|tests/test-hosted-agent-(ci-toolboxes|session-quota)\.sh|tests/test_hosted_agent_test_spec\.py)$'; then
               test_all="true"
               echo "Hosted-agent E2E infrastructure changed — testing the full matrix"
             fi
@@ -408,14 +432,16 @@ jobs:
                 echo "  - $sample_dir (skipped - requires external credentials)"
                 continue
               fi
-              if [ "$test_all" = "true" ] || echo "$changed_files" | grep -q "^${sample_dir}/"; then
+              sample_language=$(echo "$sample_dir" | awk -F/ '{print $2}')
+              if [ "$(yq '[.services[] | select(.host == "azure.ai.agent") | .protocols[]?.protocol] | any_c(. == "invocations")' "$yaml_file")" = "true" ]; then
+                protocol="invocations"
+              else
+                protocol="responses"
+              fi
+              fixture_dir="internal/tools/samples-hosted-agents/$sample_language/$protocol/$(basename "$sample_dir")"
+              if [ "$test_all" = "true" ] || echo "$changed_files" | grep -qE "^(${sample_dir}|${fixture_dir})/"; then
                 agent_name=$(yq '.name // ""' "$yaml_file")
                 sample_id=$(echo "$sample_dir" | sed 's|samples/||' | tr '/' '-')
-                if [ "$(yq '[.services[] | select(.host == "azure.ai.agent") | .protocols[]?.protocol] | any_c(. == "invocations")' "$yaml_file")" = "true" ]; then
-                  protocol="invocations"
-                else
-                  protocol="responses"
-                fi
                 while IFS= read -r entry; do
                   [ -n "$entry" ] && entries+=("$entry")
                 done < <(emit_entries "$sample_dir" "$agent_name" "$sample_id" "$protocol")

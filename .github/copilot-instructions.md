@@ -33,6 +33,8 @@ Validation gates public sync. The sync gate is a per-sample block-list driven by
 
 Samples generally live under `samples/<language>/<area>/<feature>/`. Add `sample.yaml` when using the central ADO validation pipeline; it discovers directories under `samples/` that contain `sample.yaml` and validates them to Level 3 (Load). External/team-owned pipelines may track samples through their own manifests and must report statuses per `docs/validation-results-contract.md`.
 
+For every new Python or C# hosted-agent sample, read and follow [`internal/tools/samples-hosted-agents/README.md`](../internal/tools/samples-hosted-agents/README.md). A new hosted-agent sample must register a responsible Microsoft owner and add deterministic turns/assertions in `test-spec.yml`; legacy payloads and generated defaults are migration-only.
+
 ## Sync exclusions
 
 The exclusion list lives in `.github/sync-config.json` under `exclude_pathspecs`; consult it for the authoritative set of internal-only paths excluded from sync to public. Do not put temporary validation holds in that file; the sync gate creates dynamic per-run exclusions for blocked samples.

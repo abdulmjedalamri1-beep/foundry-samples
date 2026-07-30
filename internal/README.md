@@ -7,7 +7,7 @@ This directory contains internal-only test support and tooling for the **private
 `internal/` holds test fixtures, payloads, and test suites that exercise samples in the validation and CI pipelines. None of these should ship to customers.
 
 - **Playwright E2E suite** that validates hosted-agent samples deploy via the AI Foundry VS Code extension (`playwright-tests/`)
-- **Test-payload files** consumed by the hosted-agents cloud E2E pipeline (`tools/samples-hosted-agents/`)
+- **Hosted-agent test specs and legacy payloads** consumed by the cloud E2E pipeline (`tools/samples-hosted-agents/`)
 - **VoiceLive audio smoke test** consumed by the cloud E2E pipeline (`tools/voicelive-e2e/`)
 
 ## Sync Behavior
@@ -30,7 +30,7 @@ For the full mechanics — sync gate, validation status interpretation, fast-exp
 internal/
 ├── playwright-tests/       # E2E Playwright suite: validates hosted-agent samples deploy via the AI Foundry VS Code extension
 └── tools/
-    ├── samples-hosted-agents/    # Test-payload files for the hosted-agents cloud E2E pipeline
+    ├── samples-hosted-agents/    # Test specs and legacy payloads for hosted-agent cloud E2E
     └── voicelive-e2e/      # VoiceLive end-to-end audio smoke test
 ```
 

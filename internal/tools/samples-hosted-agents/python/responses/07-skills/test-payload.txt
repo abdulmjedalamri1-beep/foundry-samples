@@ -1,1 +1,0 @@
-Create a colorful 1-day PDF travel guide for Lisbon focused on food, viewpoints, and neighborhoods. Use the travel-guide skill and return the generated $HOME-based file path.
