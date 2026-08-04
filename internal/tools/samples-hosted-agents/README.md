@@ -37,23 +37,30 @@ The fixture path is:
 ```text
 internal/tools/samples-hosted-agents/
   <language>/                 # python | csharp
-    <protocol>/               # responses | invocations
-      <sample-directory-name>/
-        test-spec.yml
+    <complete-sample-path>/   # path below samples/<language>/hosted-agents
+      test-spec.yml           # preferred behavior contract
+      test-payload.txt        # optional legacy payload
 ```
 
-The workflow derives these values as follows:
+The fixture preserves the complete sample path below the language's `hosted-agents`
+directory. For example:
 
-- **language** comes from `samples/python` or `samples/csharp`;
-- **protocol** is `invocations` when `azure.yaml` declares any Invocations
-  protocol, otherwise `responses`;
-- **sample-directory-name** is only the final basename of the sample directory,
-  not its full path below `hosted-agents/`.
+```text
+samples/python/hosted-agents/agent-framework/responses/06-files
+```
 
-Therefore two samples with the same language, selected protocol, and final directory
-name collide. Avoid such names or change fixture addressing before adding both.
-A syntactically valid orphan fixture is not useful; confirm that each spec maps to
-exactly one sample.
+maps one-to-one to:
+
+```text
+internal/tools/samples-hosted-agents/python/agent-framework/responses/06-files/
+```
+
+Both `test-spec.yml` and legacy `test-payload.txt` use this same directory identity.
+Do not shorten it to the sample directory basename. Preserving the framework,
+transport grouping, and other intermediate directories prevents distinct samples
+with the same basename from implicitly sharing test input or a behavior contract.
+CI rejects any fixture whose full path does not map back to a sample containing
+`azure.yaml`.
 
 The cloud workflow discovers all Python/C# hosted-agent `azure.yaml` files except
 samples marked `.ci-skip`. A spec customizes that existing matrix participation; it
@@ -78,10 +85,10 @@ Install the development requirements, then run both commands:
 
 ```bash
 python3 .github/scripts/hosted_agent_test_spec.py validate \
-  --spec internal/tools/samples-hosted-agents/<language>/<protocol>/<sample>/test-spec.yml
+  --spec internal/tools/samples-hosted-agents/<language>/<complete-sample-path>/test-spec.yml
 
 python3 .github/scripts/hosted_agent_test_spec.py plan \
-  --spec internal/tools/samples-hosted-agents/<language>/<protocol>/<sample>/test-spec.yml \
+  --spec internal/tools/samples-hosted-agents/<language>/<complete-sample-path>/test-spec.yml \
   --protocol <responses|invocations> \
   --output /tmp/hosted-agent-test-plan.json
 ```
@@ -397,6 +404,8 @@ Discovery order is:
 1. `test-spec.yml`;
 2. legacy `test-payload.txt`;
 3. generated protocol default.
+
+Legacy payloads use the same full sample-relative fixture directory as contracts.
 
 Each non-empty legacy payload line is one ordered turn. JSON object/array lines keep
 their structured Invocations meaning. Defaults are:

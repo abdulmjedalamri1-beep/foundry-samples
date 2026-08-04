@@ -1,4 +1,0 @@
-Upload a blob named hello.txt with the content "hi from the agent".
-Read the blob hello.txt and tell me what it contains.
-Send a Service Bus message with the body {"orderId": 42}.
-Peek the next message on the queue.

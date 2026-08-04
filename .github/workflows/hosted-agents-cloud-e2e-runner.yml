@@ -1110,9 +1110,12 @@ jobs:
           source "${{ github.workspace }}/.github/scripts/hosted-agent-retry.sh"
           PROTOCOL="${{ matrix.protocol }}"
           SAMPLE_DIR="${{ github.workspace }}/${{ matrix.path }}"
-          SAMPLE_LANG="$(echo "${{ matrix.path }}" | awk -F/ '{print $2}')"
-          SAMPLE_DIR_NAME="$(basename "${{ matrix.path }}")"
-          FIXTURE_DIR="${{ github.workspace }}/internal/tools/samples-hosted-agents/$SAMPLE_LANG/$PROTOCOL/$SAMPLE_DIR_NAME"
+          if ! FIXTURE_RELATIVE=$(python3 "${{ github.workspace }}/.github/scripts/hosted_agent_fixture.py" \
+              fixture-dir --sample-dir "${{ matrix.path }}"); then
+            echo "::error::Could not resolve the hosted-agent test fixture path"
+            exit 1
+          fi
+          FIXTURE_DIR="${{ github.workspace }}/$FIXTURE_RELATIVE"
           SPEC_FILE="$FIXTURE_DIR/test-spec.yml"
           PAYLOAD_FILE="$FIXTURE_DIR/test-payload.txt"
           PLAN_FILE="/tmp/agent-test-plan-${{ matrix.combo_id }}.json"
@@ -1636,9 +1639,9 @@ jobs:
           TOOLBOX_LABEL: ${{ matrix.toolbox_label }}
         run: |
           set -o pipefail
-          sample_lang=$(echo "${{ matrix.path }}" | awk -F/ '{print $2}')
-          sample_name=$(basename "${{ matrix.path }}")
-          fixture_dir="${{ github.workspace }}/internal/tools/samples-hosted-agents/$sample_lang/${{ matrix.protocol }}/$sample_name"
+          fixture_relative=$(python3 "${{ github.workspace }}/.github/scripts/hosted_agent_fixture.py" \
+            fixture-dir --sample-dir "${{ matrix.path }}")
+          fixture_dir="${{ github.workspace }}/$fixture_relative"
           spec_file="$fixture_dir/test-spec.yml"
           plan_file="/tmp/agent-test-plan-${{ matrix.combo_id }}.json"
           report_file="/tmp/agent-test-report-${{ matrix.combo_id }}.json"
