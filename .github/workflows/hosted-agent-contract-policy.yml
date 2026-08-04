@@ -1,0 +1,45 @@
+name: Hosted-agent Contract Policy
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "samples/python/hosted-agents/**"
+      - "samples/csharp/hosted-agents/**"
+      - ".github/workflows/hosted-agent-contract-policy.yml"
+      - ".github/scripts/check_hosted_agent_contracts.py"
+      - ".github/scripts/hosted_agent_fixture.py"
+      - ".github/scripts/hosted_agent_test_spec.py"
+      - ".github/tests/test_check_hosted_agent_contracts.py"
+      - ".github/tests/test_hosted_agent_fixture.py"
+      - ".github/tests/test_hosted_agent_test_spec.py"
+      - "internal/tools/samples-hosted-agents/**"
+
+permissions:
+  contents: read
+
+jobs:
+  contract-policy:
+    name: Hosted-agent contract policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Evaluate the contributor's head tree, not GitHub's synthetic merge
+          # commit, which may include unrelated samples newly merged into main.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Install behavior-contract dependency
+        run: python3 -m pip install --disable-pip-version-check --quiet "PyYAML==6.0.2"
+
+      - name: Test behavior-contract coverage policy
+        run: python3 .github/tests/test_check_hosted_agent_contracts.py
+
+      - name: Check behavior contracts for new hosted-agent samples
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          python3 .github/scripts/check_hosted_agent_contracts.py
+          --base "$BASE_SHA" --head HEAD

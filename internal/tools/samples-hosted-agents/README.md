@@ -30,6 +30,33 @@ Every new sample under `samples/python/hosted-agents/` or
 Legacy `test-payload.txt` and generated defaults remain migration paths for existing
 samples. They are not the preferred contract for new samples.
 
+### New-sample coverage policy
+
+Pull-request CI compares hosted-agent `azure.yaml` paths at the merge base and PR
+head. Every sample root that exists only at the head must provide a valid full-path
+`test-spec.yml`; schema validation and protocol-aware planning must both pass.
+
+The initial rollout is intentionally conservative: updates to existing sample roots,
+documentation-only changes, Git-detected moves or renames, deletions, and samples
+excluded with `.ci-skip` do not trigger contract migration. The credential-free
+workflow is a required PR check and can be run locally from the checked-out PR head with:
+
+```bash
+base=$(git merge-base origin/main HEAD)
+python3 .github/scripts/check_hosted_agent_contracts.py --base "$base" --head HEAD
+```
+
+### Resolving contract policy failures
+
+For `Missing hosted-agent behavior contract`, create the exact `Required contract`
+path printed by CI, follow the [new-sample checklist](#new-hosted-agent-sample-checklist),
+and run the protocol-aware validation commands from the check.
+
+For `Invalid hosted-agent behavior contract`, fix the exact schema or planning error
+shown under `Problem` and rerun those commands. The canonical contract reference is
+the [complete document shape](#complete-document-shape); command usage is documented
+under [local validation](#local-validation).
+
 ## Discovery and fixture identity
 
 The fixture path is:
