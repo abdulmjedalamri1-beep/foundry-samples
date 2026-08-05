@@ -288,11 +288,10 @@ post-rebase-merge tree itself, which is what GitHub will produce when
 the sync PR auto-merges. See ADO 5347121 / 5347427 for the full
 write-ups.
 
-### What's protected (as of 2026-06)
+### What's protected (as of 2026-08)
 
 ```json
 "protected_paths": [
-  ".github/workflows/redirect-pull-requests.yml",
   ".github/workflows/mirror-back.yml",
   ".github/workflows/run-setup.yml"
 ]
@@ -304,7 +303,11 @@ orphan-recovery incidents. Add a path here when:
 1. The file exists only on public main (not in private's include-set or
    `public-overlay/`).
 2. Losing it would silently break a user-visible behavior (e.g., PR
-   auto-close, mirror-back, repo bootstrap).
+   mirror-back or repo bootstrap).
+
+For an intentional retirement, remove the path from the private config and
+merge that change before deleting the public-only file. Reversing this order
+would make the next private-to-public sync fail the guard.
 
 ### What the guard does NOT enforce
 
@@ -677,6 +680,7 @@ Rollback affects public content. It does not rewrite private validation statuses
 
 | Date | Change |
 |------|--------|
+| 2026-08-05 | **Retired protection for the legacy public PR redirect workflow ([ADO 5499173](https://msdata.visualstudio.com/Vienna/_workitems/edit/5499173)).** Removed `.github/workflows/redirect-pull-requests.yml` from `protected_paths` after public-first validation made public PRs the required merge gate. The public workflow remains in place until this config change merges; deleting it first would fail the next private-to-public sync. |
 | 2026-06-29 | **mirror-back: skip on author identity only, not committer (ADO 5398977, PR #620).** `should_skip_commit` previously checked all four git identity fields (author name, author email, committer name, committer email) against the sync-bot identities. Human PRs merged to public via "direct rebase merge as the App" have a human author but sync-bot committer; this caused them to be silently dropped, producing public drift that broke sync marks on the next run. Fix: check author only. The sync pipeline always sets `GIT_AUTHOR_NAME` to the bot identity, so real sync commits still skip correctly. Regression test `test_human_author_bot_committer_not_skipped` (MB4) added to `.github/tests/test-mirror-back.sh`. Troubleshooting section updated with marks-drift recovery recipe. |
 | 2026-06-11 | **Cross-link added to sync-recovery runbook.** Troubleshooting section and Related Documents now link to [`foundry-devx-eng-docs/operations/sync-recovery-runbook.md`](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md) — the canonical end-to-end playbook authored after the 2026-06-09 → 2026-06-10 sync saga. No mechanism changes in this entry. |
 | 2026-06-10 | **Exclude-path filtering moved into `filter-stream.py` (ADO 5347427).** `git fast-export` previously ran with pathspec args, which forced `--full-tree` mode: when marks anchored on a real public commit (e.g. post-seed-recovery anchoring at `PUBLIC_SHA`), each new sync-branch commit's tree represented a wholesale delete of excluded paths (`.github/`, etc.) relative to that parent. The protected-paths guard correctly fired on this "wipe" but the wipe was structurally unnecessary — public main's workflows should pass through unchanged. Fix: drop pathspec args from `fast-export` (export now runs in delta mode), add `--no-renames` so renames decompose into D+M pairs, and apply the include-set filter in `filter-stream.py` via a new repeatable `--exclude-path` CLI arg. Dropped commits are spliced out of the mark chain (`dropped_mark_to_parent` resolution on `from :N` / `merge :N`) so `fast-import` never hits "mark :N not declared". Sync-branch commits now inherit excluded-path content from their marks-anchored parent → merge-tree result preserves protected workflows → guard passes structurally rather than relying on coincidental tree topology. Test T70 flipped from wipe-detection to seed-recovery happy-path; T66 retains genuine orphan-wipe coverage; T71 / T72 added for rename-across-boundary in both directions. Requires a one-shot `workflow_dispatch` with `seed_from_public_sha` + `seed_from_private_sha` after deployment to re-anchor existing marks. |

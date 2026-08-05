@@ -44,11 +44,10 @@ The exclusion list lives in `.github/sync-config.json` under `exclude_pathspecs`
 Two additional sync mechanisms live in `.github/sync-config.json` alongside `exclude_pathspecs`:
 
 - **`public-overlay/`** — Content under this directory ships to the public repo on every sync via `apply_public_overlay`. Use it for files that should exist on public but should not be authored in the synced tree (e.g., public-only `README.md`, `CONTRIBUTING.md`, mirror-back workflow source). The directory itself is *excluded* from the normal sync stream and re-applied as an overlay, so editing a file under `public-overlay/` is how you change the corresponding file on public main. **Public workflow files do NOT belong here** — see `docs/repo-sync-automation.md` § "Public→private mirror-back" for context.
-- **`protected_paths`** — A guard list of paths that exist on public main but are *not* in private's include-set or `public-overlay/`. `sync-core.sh` simulates the prospective rebase-merge tree and hard-fails the sync if any listed path would be deleted or modified. Today's list covers `redirect-pull-requests.yml`, `mirror-back.yml`, and `run-setup.yml`. See `docs/repo-sync-automation.md` § "Protected-paths guard" for the mechanism and recovery procedure.
+- **`protected_paths`** — A guard list of paths that exist on public main but are *not* in private's include-set or `public-overlay/`. `sync-core.sh` simulates the prospective rebase-merge tree and hard-fails the sync if any listed path would be deleted or modified. Today's list covers `mirror-back.yml` and `run-setup.yml`. See `docs/repo-sync-automation.md` § "Protected-paths guard" for the mechanism and recovery procedure.
 
 When a sync incident touches either mechanism, the canonical recovery playbook is the [Sync Recovery Runbook](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md) in `foundry-devx-eng-docs`.
 
 ## Sync incident response
 
 When a user pastes a failing `sync-to-public` run URL (e.g., `https://github.com/microsoft-foundry/foundry-samples-pr/actions/runs/<id>`) or says a sync run has failed, **read `.github/skills/sync-incident-response.md` before taking any other action.** That file is the authoritative diagnostic and recovery playbook: how to get logs, identify the failure type, confirm root cause, and choose the right recovery option. Do not guess or improvise — follow the playbook.
-
