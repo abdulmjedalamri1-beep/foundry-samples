@@ -1,6 +1,6 @@
 # Contributing to Foundry Samples
 
-> **Last updated:** 2026-07-06 — added early mailmap callout, commit message body restriction docs, and CONTRIBUTING section for commit body rule (GitHub PR [microsoft-foundry/foundry-samples-pr#658](https://github.com/microsoft-foundry/foundry-samples-pr/pull/658)).
+> **Last updated:** 2026-08-03 — added the reproducible dependency policy for Python Hosted Agent samples.
 
 This is the **private staging repository** for Microsoft Foundry documentation samples. Changes merged here are automatically synced to the public [`microsoft-foundry/foundry-samples`](https://github.com/microsoft-foundry/foundry-samples) repository on a nightly basis.
 
@@ -184,6 +184,8 @@ Each team is responsible for its own membership. There is no central approval pr
 2. Add or update your sample. Samples follow the directory structure `samples/<language>/<area>/<feature>/`. Use `sample.yaml` for the central ADO validation path, or coordinate with your owning team to ensure a team-owned pipeline posts validation statuses. See the [Validation Pipeline README](.azure-pipelines/README.md) for the full spec on directory layout and `sample.yaml` format.
 
 3. Include a descriptive `README.md` in your sample directory.
+
+4. For a new Python Hosted Agent sample, or when changing dependency inputs under `samples/python/hosted-agents/`, commit a fully resolved `requirements.txt` for each affected runtime project. Authors may use any locking tool, but `requirements.txt` is the portable consumer artifact. Follow the [Python Hosted Agent dependency policy](samples/python/hosted-agents/DEPENDENCY_POLICY.md) and run its local checker before submitting the PR.
 
 ### Submit your PR
 

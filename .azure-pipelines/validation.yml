@@ -21,6 +21,12 @@ pr:
   paths:
     include:
       - samples/**
+      - CONTRIBUTING.md
+      - docs/validation-contract.md
+      - .azure-pipelines/validation.yml
+      - .azure-pipelines/README.md
+      - .azure-pipelines/hosted-agent-python-requirements-exceptions.toml
+      - .azure-pipelines/scripts/**
     exclude:
       - internal/**
 
@@ -53,8 +59,8 @@ stages:
   # Stage 0: Check that all commit author emails are in the sync-mailmap.
   # This catches unmapped contributors at PR time — before they break the
   # nightly sync-to-public workflow.
-  - stage: CheckMailmap
-    displayName: 'Check Sync Mailmap'
+  - stage: PreChecks
+    displayName: 'Run PR and sync prechecks'
     jobs:
       - job: DetectUnmappedEmails
         displayName: 'Detect Unmapped Emails'
@@ -86,10 +92,50 @@ stages:
               fi
             displayName: 'Check for unmapped @microsoft.com emails'
 
+      - job: CheckHostedAgentPythonRequirements
+        displayName: 'Check Python Hosted Agent dependency policy'
+        condition: eq(variables['Build.Reason'], 'PullRequest')
+        steps:
+          - checkout: self
+            fetchDepth: 0
+            persistCredentials: true
+
+          - task: UsePythonVersion@0
+            displayName: 'Setup Python'
+            inputs:
+              versionSpec: '3.13'
+
+          - script: |
+              set -euo pipefail
+              python -m pip install --disable-pip-version-check \
+                "pip==25.1.1" \
+                "packaging==25.0" \
+                "PyYAML==6.0.2"
+              python -m unittest discover -v \
+                -s .azure-pipelines/scripts/tests \
+                -p 'test_check_hosted_agent_python_requirements.py'
+            displayName: 'Test dependency-policy checker'
+
+          - script: |
+              set -euo pipefail
+              TARGET_BRANCH="$(System.PullRequest.TargetBranch)"
+              TARGET_BRANCH="${TARGET_BRANCH#refs/heads/}"
+              git fetch origin "$TARGET_BRANCH"
+              MERGE_BASE="$(git merge-base "origin/$TARGET_BRANCH" HEAD)"
+              POLICY_URL="https://github.com/microsoft-foundry/foundry-samples-pr/blob/$(Build.SourceVersion)/samples/python/hosted-agents/DEPENDENCY_POLICY.md"
+
+              python .azure-pipelines/scripts/check-hosted-agent-python-requirements.py \
+                --base "$MERGE_BASE" \
+                --head HEAD \
+                --resolve \
+                --ado \
+                --policy-url "$POLICY_URL"
+            displayName: 'Enforce dependency policy'
+
   # Stage 1: Detect which samples have changed
   - stage: DetectChanges
     displayName: 'Detect Changed Samples'
-    dependsOn: CheckMailmap
+    dependsOn: PreChecks
     jobs:
       - job: AnalyzeChanges
         displayName: 'Analyze Changed Samples'

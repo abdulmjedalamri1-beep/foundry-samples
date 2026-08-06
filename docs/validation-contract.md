@@ -81,6 +81,12 @@ When `sample.yaml` has no custom commands, these defaults apply:
 | Java | `mvn compile` or `gradle build` | — (compilation proves load) |
 | Go | `go build ./...` | — (compilation proves load) |
 
+### Python Hosted Agent dependency admission policy
+
+In addition to build-readiness validation, pull requests use a ratchet policy for executable Python projects under `samples/python/hosted-agents/`. New Python Hosted Agent services and existing services whose dependency inputs change must commit a fully resolved `requirements.txt` as the portable consumer artifact. This admission check runs before sample-specific commands and is not a repository-wide Python requirement.
+
+The ratchet does not retroactively fail legacy Hosted Agent dependencies during source-only or documentation-only changes. See the [Python Hosted Agent dependency policy](../samples/python/hosted-agents/DEPENDENCY_POLICY.md) for its triggers, accepted requirement forms, authoring-tool neutrality, closure validation, and exception process.
+
 ### Recommended custom commands
 
 For samples that specify custom validation, use these patterns:
@@ -175,11 +181,12 @@ It does **not** define:
 
 ## Implementation Status
 
-> **Last updated:** 2026-04-29 for Phase C1 validation realignment.
+> **Last updated:** 2026-08-03 for the Python Hosted Agent dependency-policy ratchet.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Per-language default validation | ✅ Implemented | `validation.yml` handles C#, Python, TypeScript/JS, Java, and Go. |
+| Python Hosted Agent dependency ratchet | ✅ Implemented | New or dependency-updated runtimes under `samples/python/hosted-agents/` must commit a fully resolved `requirements.txt`. |
 | `sample.yaml` discovery | ✅ Implemented | ADO pipeline discovers samples with `find samples -name sample.yaml`. |
 | Custom build/validate/test commands | ✅ Implemented | Overrides defaults when present. |
 | PR comment reporting | ✅ Implemented | `GitHubComment@0` posts PR summaries. |

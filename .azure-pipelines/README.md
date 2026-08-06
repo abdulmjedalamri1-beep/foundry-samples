@@ -1,6 +1,6 @@
 # Sample Validation Pipeline
 
-*Last updated: 2026-06-10*
+*Last updated: 2026-08-03*
 
 This directory contains the Azure DevOps pipeline configuration for validating code samples in this repository. The `validation.yml` pipeline is the repo-owned ADO validator registered as `ado-build` in [`docs/validation-results-contract.md`](../docs/validation-results-contract.md).
 
@@ -123,6 +123,12 @@ build: pip install -r requirements.txt
 validate: python -m py_compile main.py
 test: python -m pytest tests/ -v
 ```
+
+### Python Hosted Agent dependency policy
+
+Pull requests that add a Python service under `samples/python/hosted-agents/` or change an existing Hosted Agent runtime's dependency inputs run a separate ratchet check before sample validation. The runtime must commit a fully resolved `requirements.txt` as its portable consumer artifact. Existing legacy samples remain grandfathered during source-only and documentation-only changes.
+
+The check is implemented by `.azure-pipelines/scripts/check-hosted-agent-python-requirements.py`. See [`samples/python/hosted-agents/DEPENDENCY_POLICY.md`](../samples/python/hosted-agents/DEPENDENCY_POLICY.md) for the policy, supported authoring tools, local commands, diagnostics, and exception process.
 
 ---
 
