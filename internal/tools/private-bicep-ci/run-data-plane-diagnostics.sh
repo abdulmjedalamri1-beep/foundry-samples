@@ -270,44 +270,49 @@ with open(path, encoding="utf-8") as f:
 
 failures: list[str] = []
 
-if doc.get("status") == "handler_error":
+agent_status = doc.get("status")
+if agent_status == "handler_error":
     failures.append(f"handler_error: {doc.get('error', {}).get('message', '<no message>')}")
+elif agent_status == "partial":
+    failures.append("diagnostic agent reported a partial result")
 
-for section_error in doc.get("section_errors") or []:
-    failures.append(f"section {section_error.get('section')} failed: {section_error.get('err')}")
-
-checks = doc.get("checks") or {}
-hosts = checks.get("hosts") or []
-if not hosts:
+results = doc.get("results") or []
+host_results = [result for result in results if (result.get("target") or {}).get("host")]
+if not host_results:
     failures.append("diagnostic response did not include any host probes")
 
-print("Data-plane diagnostic host summary:")
-for host_result in hosts:
-    host = host_result.get("host", "<unknown>")
-    dns = host_result.get("dns") or {}
-    tcp = host_result.get("tcp_443") or {}
-    tls = host_result.get("tls_443") or {}
-    http = host_result.get("http_get") or {}
-    http_status = http.get("code") if http.get("status") == "ok" else http.get("status")
-    print(f"- {host}: dns={dns.get('status')} tcp={tcp.get('status')} tls={tls.get('status')} http={http_status}")
+results_by_host: dict[str, list[dict]] = {}
+for result in host_results:
+    host = result["target"]["host"]
+    results_by_host.setdefault(host, []).append(result)
 
-    for layer_name, layer in (("dns", dns), ("tcp_443", tcp), ("tls_443", tls)):
-        if layer.get("status") != "ok":
+print("Data-plane diagnostic host summary:")
+for host, host_probe_results in sorted(results_by_host.items()):
+    statuses = " ".join(
+        f"{result.get('probe', '<unknown>')}={result.get('status', '<unknown>')}"
+        for result in host_probe_results
+    )
+    print(f"- {host}: {statuses}")
+
+    for result in host_probe_results:
+        if result.get("status") in {"fail", "error"}:
             failures.append(
-                f"{host} {layer_name} failed: {layer.get('err') or layer.get('msg') or layer.get('hint') or layer}"
+                f"{host} {result.get('probe', '<unknown>')} failed: "
+                f"{result.get('summary') or result.get('findings') or result}"
             )
 
-    if http and http.get("status") != "ok":
+for public_result in (result for result in results if result.get("probe") == "egress.public"):
+    if public_result.get("status") in {"fail", "error"}:
         failures.append(
-            f"{host} http_get failed: {http.get('err') or http.get('msg') or http.get('hint') or http}"
+            f"public probe {(public_result.get('target') or {}).get('url')} failed: "
+            f"{public_result.get('summary') or public_result.get('findings') or public_result}"
         )
 
-for public_result in checks.get("public_hosts") or []:
-    if public_result.get("status") != "ok":
-        failures.append(
-            f"public probe {public_result.get('url')} failed: "
-            f"{public_result.get('err') or public_result.get('msg') or public_result}"
-        )
+summary = doc.get("summary") or {}
+if summary.get("status") in {"fail", "error"} and not any(
+    result.get("status") in {"fail", "error"} for result in host_results
+):
+    failures.append(f"diagnostic summary reported {summary.get('status')}")
 
 if failures:
     print("Data-plane diagnostic failures:", file=sys.stderr)
