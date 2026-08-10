@@ -700,6 +700,55 @@ jobs:
         run: azd provision --no-prompt
         timeout-minutes: 15
 
+      # ── Verify connections in the selected Foundry project ──────────
+      - name: Verify Foundry project connections
+        working-directory: /tmp/ci-${{ matrix.combo_id }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t required_connections < <(
+            yq -r '
+              .services
+              | to_entries[]
+              | select(.value.host == "azure.ai.connection")
+              | .key
+            ' azure.yaml
+          )
+          if [ ${#required_connections[@]} -eq 0 ]; then
+            echo "No azure.ai.connection services declared; skipping connection verification."
+            exit 0
+          fi
+
+          endpoint="$(azd env get-value AZURE_AI_PROJECT_ENDPOINT)"
+          if [ -z "$endpoint" ]; then
+            echo "::error::AZURE_AI_PROJECT_ENDPOINT is not set in the active azd environment"
+            exit 1
+          fi
+
+          connections_json="$(azd ai connection list \
+            --project-endpoint "$endpoint" \
+            --output json \
+            --no-prompt)"
+          echo "Connections in the selected Foundry project:"
+          jq -r '.[].name' <<< "$connections_json"
+
+          missing=()
+          for name in "${required_connections[@]}"; do
+            if ! jq -e --arg name "$name" 'any(.[]; .name == $name)' \
+                <<< "$connections_json" >/dev/null; then
+              missing+=("$name")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing Foundry project connections at $endpoint: ${missing[*]}"
+            exit 1
+          fi
+
+          connection_names=$(IFS=,; echo "${required_connections[*]}")
+          azd env set AZURE_AI_PROJECT_CONNECTION_NAMES "$connection_names"
+          azd env set AZURE_AI_PROJECT_CONNECTIONS_PROJECT_ENDPOINT "$endpoint"
+          echo "Verified Foundry project connections: $connection_names"
+
       # ── Override toolbox env values in azure.yaml (toolbox samples) ─────
       # The committed azure.yaml carries per-sample defaults on the
       # azure.ai.agent service's `env:` map (e.g. `TOOLBOX_NAME: my-toolbox` or
