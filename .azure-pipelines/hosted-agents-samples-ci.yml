@@ -1,0 +1,436 @@
+# Hosted Agents samples CI
+# Deploys hosted-agent samples to a persistent Foundry CI project and invokes them.
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - .azure-pipelines/hosted-agents-samples-ci.yml
+      - internal/tools/samples-hosted-agents/**
+      - internal/tools/samples-hosted-agents-ci/**
+      - samples/python/hosted-agents/**
+      - samples/csharp/hosted-agents/**
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - .azure-pipelines/hosted-agents-samples-ci.yml
+      - internal/tools/samples-hosted-agents/**
+      - internal/tools/samples-hosted-agents-ci/**
+      - samples/python/hosted-agents/**
+      - samples/csharp/hosted-agents/**
+
+schedules:
+  - cron: '0 9 * * *'
+    displayName: Daily hosted-agent samples validation
+    branches:
+      include:
+        - main
+    always: true
+
+parameters:
+  - name: validateAll
+    displayName: Validate all hosted-agent samples
+    type: boolean
+    default: false
+  - name: samplePath
+    displayName: Optional hosted-agent sample directory
+    type: string
+    default: auto
+  - name: deployMode
+    displayName: Deployment mode
+    type: string
+    default: container
+    values:
+      - container
+      - code
+      - both
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: foundry-samples-hosted-agents-ci
+  - name: HOSTED_AGENT_ROOTS
+    value: 'samples/python/hosted-agents samples/csharp/hosted-agents'
+
+stages:
+  - stage: Discover
+    displayName: Discover hosted-agent samples
+    jobs:
+      - job: DiscoverSamples
+        displayName: Build sample matrix
+        steps:
+          - checkout: self
+            fetchDepth: 0
+            persistCredentials: true
+
+          - task: GoTool@0
+            displayName: Setup Go for yq
+            inputs:
+              version: '1.21'
+
+          - bash: |
+              set -euo pipefail
+              go install github.com/mikefarah/yq/v4@latest
+              echo "##vso[task.prependpath]$(go env GOPATH)/bin"
+            displayName: Install yq
+
+          - bash: |
+              set -euo pipefail
+
+              chmod +x internal/tools/samples-hosted-agents-ci/discover-samples.sh
+
+              sample_path="$SAMPLE_PATH_PARAMETER"
+              if [ "$sample_path" = "auto" ]; then
+                sample_path=""
+              fi
+
+              if [ -n "$sample_path" ]; then
+                mode="all"
+                base_ref="origin/main"
+              elif [ "${VALIDATE_ALL_PARAMETER,,}" = "true" ] || [ "$(Build.Reason)" = "Schedule" ]; then
+                mode="all"
+                base_ref="origin/main"
+              elif [ "$(Build.Reason)" = "PullRequest" ]; then
+                target_branch="${SYSTEM_PULLREQUEST_TARGETBRANCH:?Missing pull request target branch.}"
+                target_branch="${target_branch#refs/heads/}"
+                git fetch origin "$target_branch"
+                mode="changed"
+                base_ref="origin/$target_branch"
+              else
+                mode="changed"
+                base_ref="HEAD~1"
+              fi
+
+              echo "Discovery mode: $mode"
+              echo "Base ref:       $base_ref"
+              echo "Sample path:    $sample_path"
+              echo "Deploy mode:    $DEPLOY_MODE_PARAMETER"
+
+              internal/tools/samples-hosted-agents-ci/discover-samples.sh \
+                "$mode" \
+                "$base_ref" \
+                "$sample_path" \
+                "$DEPLOY_MODE_PARAMETER" \
+                > "$(Build.ArtifactStagingDirectory)/hosted-agent-samples-matrix.json"
+
+              cat "$(Build.ArtifactStagingDirectory)/hosted-agent-samples-matrix.json" | jq .
+              matrix="$(jq -c '.matrix' "$(Build.ArtifactStagingDirectory)/hosted-agent-samples-matrix.json")"
+              count="$(jq -r '.count' "$(Build.ArtifactStagingDirectory)/hosted-agent-samples-matrix.json")"
+              echo "Discovered $count hosted-agent sample job(s)."
+              echo "##vso[task.setvariable variable=sampleMatrix;isOutput=true]$matrix"
+              echo "##vso[task.setvariable variable=sampleCount;isOutput=true]$count"
+            name: discover
+            displayName: Discover hosted-agent sample matrix
+            env:
+              SAMPLE_PATH_PARAMETER: ${{ parameters.samplePath }}
+              VALIDATE_ALL_PARAMETER: ${{ parameters.validateAll }}
+              DEPLOY_MODE_PARAMETER: ${{ parameters.deployMode }}
+
+          - publish: $(Build.ArtifactStagingDirectory)/hosted-agent-samples-matrix.json
+            artifact: HostedAgentSamplesMatrix
+            displayName: Publish sample matrix
+
+  - stage: EnsureModelDeployment
+    displayName: Ensure configured model deployment
+    dependsOn: Discover
+    condition: and(succeeded(), ne(dependencies.Discover.outputs['DiscoverSamples.discover.sampleCount'], '0'))
+    jobs:
+      - job: EnsureModelDeployment
+        displayName: Ensure model deployment
+        steps:
+          - task: AzureCLI@2
+            displayName: Ensure configured model deployment exists
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+
+                az account set --subscription "$(AZURE_SUBSCRIPTION_ID)"
+                actual="$(az account show --query id -o tsv)"
+                test "$actual" = "$(AZURE_SUBSCRIPTION_ID)"
+
+                optional_value() {
+                  local value="${1:-}"
+                  if [[ "$value" == \$\(*\) ]]; then
+                    value=""
+                  fi
+                  printf '%s' "$value"
+                }
+
+                ensure_role_assignment() {
+                  local assignee="$1"
+                  local role="$2"
+                  local scope="$3"
+                  local principal_type="${4:-}"
+
+                  local existing
+                  existing="$(az role assignment list --assignee "$assignee" --role "$role" --scope "$scope" --query "length([])" -o tsv 2>/dev/null || echo 0)"
+                  if [ "$existing" != "0" ]; then
+                    echo "Role '$role' already assigned on $scope."
+                    return 0
+                  fi
+
+                  if [ -n "$principal_type" ]; then
+                    az role assignment create --assignee-object-id "$assignee" --assignee-principal-type "$principal_type" --role "$role" --scope "$scope" --output none
+                  else
+                    az role assignment create --assignee "$assignee" --role "$role" --scope "$scope" --output none
+                  fi
+                }
+
+                deployment_name="$(AZURE_AI_MODEL_DEPLOYMENT_NAME)"
+                model_name="$(optional_value "${AZURE_AI_MODEL_NAME:-}")"
+                model_version="$(optional_value "${AZURE_AI_MODEL_VERSION:-}")"
+                sku_name="$(optional_value "${AZURE_AI_MODEL_SKU_NAME:-}")"
+                sku_capacity="$(optional_value "${AZURE_AI_MODEL_SKU_CAPACITY:-}")"
+                model_name="${model_name:-$deployment_name}"
+                model_version="${model_version:-2025-04-14}"
+                sku_name="${sku_name:-GlobalStandard}"
+                sku_capacity="${sku_capacity:-10}"
+
+                if az cognitiveservices account deployment show \
+                  --resource-group "$(AZURE_RESOURCE_GROUP)" \
+                  --name "$(AZURE_AI_ACCOUNT_NAME)" \
+                  --deployment-name "$deployment_name" \
+                  >/dev/null 2>&1; then
+                  echo "Model deployment '$deployment_name' already exists."
+                else
+                  echo "Creating model deployment '$deployment_name' ($model_name $model_version, $sku_name/$sku_capacity)."
+                  az cognitiveservices account deployment create \
+                    --resource-group "$(AZURE_RESOURCE_GROUP)" \
+                    --name "$(AZURE_AI_ACCOUNT_NAME)" \
+                    --deployment-name "$deployment_name" \
+                    --model-format OpenAI \
+                    --model-name "$model_name" \
+                    --model-version "$model_version" \
+                    --sku-name "$sku_name" \
+                    --sku-capacity "$sku_capacity" \
+                    --output none
+                fi
+
+                az cognitiveservices account deployment show \
+                  --resource-group "$(AZURE_RESOURCE_GROUP)" \
+                  --name "$(AZURE_AI_ACCOUNT_NAME)" \
+                  --deployment-name "$deployment_name" \
+                  --query "{name:name,model:properties.model.name,version:properties.model.version,sku:sku.name,capacity:sku.capacity}" \
+                  -o table
+
+                additional_deployments="$(optional_value "${AZURE_AI_ADDITIONAL_DEPLOYMENTS:-}")"
+                if [ -n "$additional_deployments" ]; then
+                  echo "$additional_deployments" | tr ',' '\n' | while IFS=':' read -r extra_deployment extra_model extra_version extra_sku extra_capacity; do
+                    [ -n "${extra_deployment:-}" ] || continue
+                    extra_model="${extra_model:-$extra_deployment}"
+                    extra_version="${extra_version:-2025-04-14}"
+                    extra_sku="${extra_sku:-GlobalStandard}"
+                    extra_capacity="${extra_capacity:-10}"
+
+                    if az cognitiveservices account deployment show \
+                      --resource-group "$(AZURE_RESOURCE_GROUP)" \
+                      --name "$(AZURE_AI_ACCOUNT_NAME)" \
+                      --deployment-name "$extra_deployment" \
+                      >/dev/null 2>&1; then
+                      echo "Model deployment '$extra_deployment' already exists."
+                    else
+                      echo "Creating model deployment '$extra_deployment' ($extra_model $extra_version, $extra_sku/$extra_capacity)."
+                      az cognitiveservices account deployment create \
+                        --resource-group "$(AZURE_RESOURCE_GROUP)" \
+                        --name "$(AZURE_AI_ACCOUNT_NAME)" \
+                        --deployment-name "$extra_deployment" \
+                        --model-format OpenAI \
+                        --model-name "$extra_model" \
+                        --model-version "$extra_version" \
+                        --sku-name "$extra_sku" \
+                        --sku-capacity "$extra_capacity" \
+                        --output none
+                    fi
+                  done
+                fi
+
+                search_service_name="$(optional_value "${AZURE_AI_SEARCH_SERVICE_NAME:-}")"
+                if [ -n "$search_service_name" ]; then
+                  echo "Ensuring Azure AI Search service '$search_service_name'."
+                  if az search service show \
+                    --resource-group "$(AZURE_RESOURCE_GROUP)" \
+                    --name "$search_service_name" \
+                    >/dev/null 2>&1; then
+                    echo "Search service '$search_service_name' already exists."
+                  else
+                    az search service create \
+                      --resource-group "$(AZURE_RESOURCE_GROUP)" \
+                      --name "$search_service_name" \
+                      --location "$(AZURE_LOCATION)" \
+                      --sku basic \
+                      --partition-count 1 \
+                      --replica-count 1 \
+                      --identity-type SystemAssigned \
+                      --output none
+                  fi
+
+                  search_id="$(az search service show --resource-group "$(AZURE_RESOURCE_GROUP)" --name "$search_service_name" --query id -o tsv)"
+                  search_principal_id="$(az search service show --resource-group "$(AZURE_RESOURCE_GROUP)" --name "$search_service_name" --query identity.principalId -o tsv)"
+                  foundry_id="$(az cognitiveservices account show --resource-group "$(AZURE_RESOURCE_GROUP)" --name "$(AZURE_AI_ACCOUNT_NAME)" --query id -o tsv)"
+                  assignee="${servicePrincipalId:-}"
+
+                  if [ -n "$assignee" ]; then
+                    ensure_role_assignment "$assignee" "Search Service Contributor" "$search_id"
+                    ensure_role_assignment "$assignee" "Search Index Data Contributor" "$search_id"
+                  fi
+
+                  if [ -n "$search_principal_id" ]; then
+                    ensure_role_assignment "$search_principal_id" "Cognitive Services User" "$foundry_id" "ServicePrincipal"
+                  fi
+
+                  az search service show \
+                    --resource-group "$(AZURE_RESOURCE_GROUP)" \
+                    --name "$search_service_name" \
+                    --query "{name:name,location:location,sku:sku.name,identity:identity.principalId,provisioningState:provisioningState}" \
+                    -o table
+                fi
+            env:
+              AZURE_AI_MODEL_NAME: $(AZURE_AI_MODEL_NAME)
+              AZURE_AI_MODEL_VERSION: $(AZURE_AI_MODEL_VERSION)
+              AZURE_AI_MODEL_SKU_NAME: $(AZURE_AI_MODEL_SKU_NAME)
+              AZURE_AI_MODEL_SKU_CAPACITY: $(AZURE_AI_MODEL_SKU_CAPACITY)
+              AZURE_AI_ADDITIONAL_DEPLOYMENTS: $(AZURE_AI_ADDITIONAL_DEPLOYMENTS)
+              AZURE_SEARCH_ENDPOINT: $(AZURE_SEARCH_ENDPOINT)
+
+  - stage: Validate
+    displayName: Deploy and invoke hosted-agent samples
+    dependsOn:
+      - Discover
+      - EnsureModelDeployment
+    condition: and(succeeded(), ne(dependencies.Discover.outputs['DiscoverSamples.discover.sampleCount'], '0'))
+    jobs:
+      - job: ValidateSamples
+        displayName: Sample
+        timeoutInMinutes: 90
+        strategy:
+          maxParallel: 8
+          matrix: $[ stageDependencies.Discover.DiscoverSamples.outputs['discover.sampleMatrix'] ]
+        steps:
+          - checkout: self
+            fetchDepth: 0
+            persistCredentials: true
+
+          - task: GoTool@0
+            displayName: Setup Go for yq
+            inputs:
+              version: '1.21'
+
+          - bash: |
+              set -euo pipefail
+              go install github.com/mikefarah/yq/v4@latest
+              echo "##vso[task.prependpath]$(go env GOPATH)/bin"
+            displayName: Install yq
+
+          - task: AzureCLI@2
+            displayName: Deploy hosted-agent sample
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                az account set --subscription "$(AZURE_SUBSCRIPTION_ID)"
+                actual="$(az account show --query id -o tsv)"
+                test "$actual" = "$(AZURE_SUBSCRIPTION_ID)"
+
+                chmod +x internal/tools/samples-hosted-agents-ci/run-sample.sh
+                internal/tools/samples-hosted-agents-ci/run-sample.sh deploy
+            env:
+              SAMPLE_PATH: $(samplePath)
+              SAMPLE_NAME: $(sampleName)
+              SAMPLE_LANGUAGE: $(language)
+              SAMPLE_PROTOCOL: $(protocol)
+              DEPLOY_MODE: $(deployMode)
+              SAMPLE_RUNTIME: $(runtime)
+              SAMPLE_ENTRY_POINT: $(entryPoint)
+              SAMPLE_COMBO_ID: $(comboId)
+              AZURE_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+              AZURE_LOCATION: $(AZURE_LOCATION)
+              AZURE_RESOURCE_GROUP: $(AZURE_RESOURCE_GROUP)
+              AZURE_AI_PROJECT_ID: $(AZURE_AI_PROJECT_ID)
+              AZURE_AI_PROJECT_ENDPOINT: $(AZURE_AI_PROJECT_ENDPOINT)
+              FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
+              AZURE_CONTAINER_REGISTRY_ENDPOINT: $(AZURE_CONTAINER_REGISTRY_ENDPOINT)
+              AZURE_AI_MODEL_DEPLOYMENT_NAME: $(AZURE_AI_MODEL_DEPLOYMENT_NAME)
+              AZURE_OPENAI_DEPLOYMENT: $(AZURE_OPENAI_DEPLOYMENT)
+              AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+              AZURE_AI_EMBEDDING_DEPLOYMENT_NAME: $(AZURE_AI_EMBEDDING_DEPLOYMENT_NAME)
+              AZURE_AI_SEARCH_SERVICE_NAME: $(AZURE_AI_SEARCH_SERVICE_NAME)
+              AZURE_SEARCH_ENDPOINT: $(AZURE_SEARCH_ENDPOINT)
+              AZURE_STORAGE_ACCOUNT_NAME: $(AZURE_STORAGE_ACCOUNT_NAME)
+              AZURE_STORAGE_CONTAINER_NAME: $(AZURE_STORAGE_CONTAINER_NAME)
+              AZURE_SERVICEBUS_FQDN: $(AZURE_SERVICEBUS_FQDN)
+              AZURE_SERVICEBUS_QUEUE_NAME: $(AZURE_SERVICEBUS_QUEUE_NAME)
+              TOOLBOX_MODEL_DEPLOYMENT_NAME: $(TOOLBOX_MODEL_DEPLOYMENT_NAME)
+
+          - task: AzureCLI@2
+            displayName: Invoke hosted-agent sample
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                az account set --subscription "$(AZURE_SUBSCRIPTION_ID)"
+                actual="$(az account show --query id -o tsv)"
+                test "$actual" = "$(AZURE_SUBSCRIPTION_ID)"
+
+                chmod +x internal/tools/samples-hosted-agents-ci/run-sample.sh
+                internal/tools/samples-hosted-agents-ci/run-sample.sh invoke
+            env:
+              SAMPLE_PATH: $(samplePath)
+              SAMPLE_NAME: $(sampleName)
+              SAMPLE_LANGUAGE: $(language)
+              SAMPLE_PROTOCOL: $(protocol)
+              DEPLOY_MODE: $(deployMode)
+              SAMPLE_RUNTIME: $(runtime)
+              SAMPLE_ENTRY_POINT: $(entryPoint)
+              SAMPLE_COMBO_ID: $(comboId)
+              AZURE_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+              AZURE_LOCATION: $(AZURE_LOCATION)
+              AZURE_RESOURCE_GROUP: $(AZURE_RESOURCE_GROUP)
+              AZURE_AI_PROJECT_ID: $(AZURE_AI_PROJECT_ID)
+              AZURE_AI_PROJECT_ENDPOINT: $(AZURE_AI_PROJECT_ENDPOINT)
+              FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
+              AZURE_CONTAINER_REGISTRY_ENDPOINT: $(AZURE_CONTAINER_REGISTRY_ENDPOINT)
+              AZURE_AI_MODEL_DEPLOYMENT_NAME: $(AZURE_AI_MODEL_DEPLOYMENT_NAME)
+              AZURE_OPENAI_DEPLOYMENT: $(AZURE_OPENAI_DEPLOYMENT)
+              AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+              AZURE_AI_EMBEDDING_DEPLOYMENT_NAME: $(AZURE_AI_EMBEDDING_DEPLOYMENT_NAME)
+              AZURE_AI_SEARCH_SERVICE_NAME: $(AZURE_AI_SEARCH_SERVICE_NAME)
+              AZURE_SEARCH_ENDPOINT: $(AZURE_SEARCH_ENDPOINT)
+              AZURE_STORAGE_ACCOUNT_NAME: $(AZURE_STORAGE_ACCOUNT_NAME)
+              AZURE_STORAGE_CONTAINER_NAME: $(AZURE_STORAGE_CONTAINER_NAME)
+              AZURE_SERVICEBUS_FQDN: $(AZURE_SERVICEBUS_FQDN)
+              AZURE_SERVICEBUS_QUEUE_NAME: $(AZURE_SERVICEBUS_QUEUE_NAME)
+              TOOLBOX_MODEL_DEPLOYMENT_NAME: $(TOOLBOX_MODEL_DEPLOYMENT_NAME)
+
+          - publish: $(Build.ArtifactStagingDirectory)/samples-hosted-agents
+            artifact: hosted-agent-sample-$(comboId)
+            condition: always()
+            displayName: Publish hosted-agent sample artifacts
+
+  - stage: NoSamples
+    displayName: No hosted-agent samples to validate
+    dependsOn: Discover
+    condition: and(succeeded(), eq(dependencies.Discover.outputs['DiscoverSamples.discover.sampleCount'], '0'))
+    jobs:
+      - job: NoOp
+        displayName: No hosted-agent sample changes
+        steps:
+          - bash: |
+              echo "No hosted-agent samples were selected for this run."
+            displayName: Report no-op

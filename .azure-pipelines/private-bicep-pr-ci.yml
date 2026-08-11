@@ -35,6 +35,7 @@ pool:
   vmImage: ubuntu-latest
 
 variables:
+  - group: foundry-samples-private-bicep-ci
   - name: BICEP_ROOT
     value: infrastructure/infrastructure-setup-bicep
 
@@ -151,6 +152,7 @@ stages:
     jobs:
       - job: DeployChangedBicepSamples
         displayName: Deploy changed Bicep samples
+        timeoutInMinutes: 180
         steps:
           - checkout: self
             fetchDepth: 0
@@ -169,6 +171,8 @@ stages:
 
                 primary_location="$(CI_LOCATION)"
                 fallback_location="$(CI_LOCATION_FALLBACK)"
+                ci_model_name="${CI_MODEL_NAME:-gpt-5-mini}"
+                ci_model_version="${CI_MODEL_VERSION:-2025-08-07}"
                 rg_prefix="rg-template-ci-$(Build.BuildId)-$(System.JobAttempt)"
                 deployment_prefix="template-ci-$(Build.BuildId)"
                 cleanup_groups=()
@@ -272,6 +276,7 @@ stages:
                 deploy_with_location() {
                   local deployment_file="$1"
                   local location="$2"
+                  local deployment_slot="${3:-primary}"
                   local dir
                   local base
                   local extension
@@ -280,9 +285,13 @@ stages:
                   local safe_name
                   local safe_base
                   local safe_location
+                  local safe_slot
+                  local deployment_hash
                   local unique_name
+                  local unique_ai_prefix
                   local unique_key_vault_name
                   local unique_storage_name
+                  local ci_key_version
                   local rg_name
                   local deployment_name
 
@@ -294,11 +303,15 @@ stages:
                   safe_name="$(basename "$dir" | tr -cd '[:alnum:]-' | cut -c1-24)"
                   safe_base="$(basename "$base" ".$extension" | tr -cd '[:alnum:]-' | cut -c1-16)"
                   safe_location="$(printf '%s' "$location" | tr -cd '[:alnum:]' | cut -c1-8)"
-                  unique_name="$(printf 'fsci%s%s%s%s' "$(Build.BuildId)" "$(System.JobAttempt)" "$safe_location" "$safe_name" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]-' | cut -c1-45)"
-                  unique_key_vault_name="$(printf 'fsci%s%s%s%s' "$(Build.BuildId)" "$(System.JobAttempt)" "$safe_location" "$safe_name" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]-' | cut -c1-24)"
-                  unique_storage_name="$(printf 'fsci%s%s%s%s' "$(Build.BuildId)" "$(System.JobAttempt)" "$safe_location" "$safe_name" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]' | cut -c1-24)"
-                  rg_name="$rg_prefix-$safe_location-$safe_name-$safe_base"
-                  deployment_name="$deployment_prefix-$safe_name-$safe_base"
+                  safe_slot="$(printf '%s' "$deployment_slot" | tr -cd '[:alnum:]' | cut -c1-1)"
+                  deployment_hash="$(printf '%s:%s' "$deployment_file" "$safe_slot" | sha256sum | cut -c1-6)"
+                  unique_name="$(printf 'fsci%s%s%s%s%s%s' "$(Build.BuildId)" "$(System.JobAttempt)" "$deployment_hash" "$safe_location" "$safe_slot" "$safe_name" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]-' | cut -c1-37)"
+                  unique_ai_prefix="$(printf 'fs%s%s%s' "$(Build.BuildId)" "$(System.JobAttempt)" "$deployment_hash" | tr -cd '[:alnum:]' | cut -c1-13)"
+                  unique_key_vault_name="$(printf 'fsci%s%s%s%s%s%s' "$(Build.BuildId)" "$(System.JobAttempt)" "$deployment_hash" "$safe_location" "$safe_slot" "$safe_name" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]-' | cut -c1-24)"
+                  unique_storage_name="$(printf 'fsci%s%s%s%s%s%s' "$(Build.BuildId)" "$(System.JobAttempt)" "$deployment_hash" "$safe_location" "$safe_slot" "$safe_name" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]' | cut -c1-24)"
+                  rg_name="$rg_prefix-$safe_location-$deployment_hash-$safe_slot-$safe_name-$safe_base"
+                  deployment_name="$deployment_prefix-$deployment_hash-$safe_slot-$safe_name"
+                  ci_key_version=""
 
                   template_declares_param() {
                     local param_name="$1"
@@ -324,6 +337,36 @@ stages:
                     fi
                   }
 
+                  prepare_ci_key_version() {
+                    if ! template_declares_param keyVersion || ! template_declares_param keyVaultName; then
+                      return
+                    fi
+
+                    echo "Creating CI Key Vault key for $deployment_file"
+                    az keyvault create \
+                      --name "$unique_key_vault_name" \
+                      --resource-group "$rg_name" \
+                      --location "$location" \
+                      --enable-rbac-authorization false \
+                      --public-network-access Enabled \
+                      --retention-days 7 \
+                      --only-show-errors >/dev/null
+
+                    ci_key_uri="$(az keyvault key create \
+                      --vault-name "$unique_key_vault_name" \
+                      --name key \
+                      --kty RSA \
+                      --size 2048 \
+                      --ops encrypt decrypt sign verify wrapKey unwrapKey \
+                      --query 'key.kid' -o tsv)"
+                    ci_key_version="${ci_key_uri##*/}"
+
+                    if [ -z "$ci_key_version" ]; then
+                      echo "##vso[task.logissue type=error]Could not resolve CI Key Vault key version for $unique_key_vault_name."
+                      return 1
+                    fi
+                  }
+
                   echo "Creating resource group $rg_name in $location"
                   az group create \
                     --name "$rg_name" \
@@ -344,15 +387,22 @@ stages:
                       template_file="$dir/${using_path#./}"
                     fi
 
+                    prepare_ci_key_version || return 1
+
                     add_parameter_override aiFoundryName "$unique_name"
+                    add_parameter_override aiServices "$unique_ai_prefix"
                     add_parameter_override aiServicesName "$unique_name"
                     add_parameter_override accountName "$unique_name"
+                    add_parameter_override apimName "apim-$unique_storage_name"
                     add_parameter_override backendAccountName "$unique_name-backend"
-                    add_parameter_override apimName "$unique_name-apim"
                     add_parameter_override customDNSName "$unique_name-alt"
                     add_parameter_override storageAccountName "$unique_storage_name"
                     add_parameter_override azureStorageName "$unique_storage_name"
                     add_parameter_override keyVaultName "$unique_key_vault_name"
+                    add_parameter_override keyName key
+                    add_parameter_override keyVersion "$ci_key_version"
+                    add_parameter_override modelName "$ci_model_name"
+                    add_parameter_override modelVersion "$ci_model_version"
 
                     az deployment group create \
                       --resource-group "$rg_name" \
@@ -370,15 +420,22 @@ stages:
                       deployment_args+=(--parameters location="$location")
                     fi
 
+                    prepare_ci_key_version || return 1
+
                     add_parameter_override aiFoundryName "$unique_name"
+                    add_parameter_override aiServices "$unique_ai_prefix"
                     add_parameter_override aiServicesName "$unique_name"
                     add_parameter_override accountName "$unique_name"
+                    add_parameter_override apimName "apim-$unique_storage_name"
                     add_parameter_override backendAccountName "$unique_name-backend"
-                    add_parameter_override apimName "$unique_name-apim"
                     add_parameter_override customDNSName "$unique_name-alt"
                     add_parameter_override storageAccountName "$unique_storage_name"
                     add_parameter_override azureStorageName "$unique_storage_name"
                     add_parameter_override keyVaultName "$unique_key_vault_name"
+                    add_parameter_override keyName key
+                    add_parameter_override keyVersion "$ci_key_version"
+                    add_parameter_override modelName "$ci_model_name"
+                    add_parameter_override modelVersion "$ci_model_version"
 
                     az deployment group create "${deployment_args[@]}" || return 1
                   fi
@@ -416,14 +473,53 @@ stages:
                   echo "Data-plane diagnostics completed for $deployment_name."
                 }
 
+                bicepparam_supports_location() {
+                  local deployment_file="$1"
+                  local location="$2"
+                  local dir
+                  local base
+                  local extension
+                  local temp_param
+                  local temp_output
+
+                  dir="$(dirname "$deployment_file")"
+                  base="$(basename "$deployment_file")"
+                  extension="${base##*.}"
+
+                  if [ "$extension" != "bicepparam" ]; then
+                    return 0
+                  fi
+
+                  temp_param="$dir/.ci.location-check.$base"
+                  temp_output="$dir/.ci.location-check.$base.json"
+
+                  if grep -qE '^param[[:space:]]+location[[:space:]]*=' "$deployment_file"; then
+                    sed -E "s|^param[[:space:]]+location[[:space:]]*=.*|param location = '$location'|" "$deployment_file" > "$temp_param"
+                  else
+                    cp "$deployment_file" "$temp_param"
+                  fi
+
+                  if az bicep build-params --file "$temp_param" --outfile "$temp_output" --only-show-errors; then
+                    rm -f "$temp_param" "$temp_output"
+                    return 0
+                  fi
+
+                  rm -f "$temp_param" "$temp_output"
+                  return 1
+                }
+
                 for deployment_file in "${deployment_files[@]}"; do
                   echo "Deploying $deployment_file in $primary_location"
-                  if deploy_with_location "$deployment_file" "$primary_location"; then
+                  if deploy_with_location "$deployment_file" "$primary_location" "primary"; then
                     continue
                   fi
 
                   echo "##vso[task.logissue type=error]Deployment failed in $primary_location for $deployment_file."
                   echo "Retrying in $fallback_location to collect fallback-region validation evidence."
-                  deploy_with_location "$deployment_file" "$fallback_location" || true
+                  if bicepparam_supports_location "$deployment_file" "$fallback_location"; then
+                    deploy_with_location "$deployment_file" "$fallback_location" "fallback" || true
+                  else
+                    echo "##vso[task.logissue type=warning]Skipping fallback deployment because $deployment_file does not allow location '$fallback_location'."
+                  fi
                   exit 1
                 done

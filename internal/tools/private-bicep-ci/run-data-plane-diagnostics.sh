@@ -210,11 +210,26 @@ PY
 discover_probe_hosts() {
   local account_name="$1"
   local hosts_file="$2"
+  local endpoints_file
+
+  endpoints_file="$(mktemp)"
 
   {
-    printf '%s.services.ai.azure.com\n' "$account_name"
-    printf '%s.cognitiveservices.azure.com\n' "$account_name"
-    printf '%s.openai.azure.com\n' "$account_name"
+    az resource show --ids "$account_id" \
+      --query "[properties.endpoint, properties.endpoints.*][]" -o tsv 2>/dev/null || true
+    az resource show --ids "$project_id" \
+      --query "properties.endpoints.*" -o tsv 2>/dev/null || true
+  } | while IFS= read -r endpoint; do host_from_url "$endpoint"; done \
+    | sed '/^$/d' | sort -u > "$endpoints_file"
+
+  {
+    if [ -s "$endpoints_file" ]; then
+      cat "$endpoints_file"
+    else
+      printf '%s.services.ai.azure.com\n' "$account_name"
+      printf '%s.cognitiveservices.azure.com\n' "$account_name"
+      printf '%s.openai.azure.com\n' "$account_name"
+    fi
 
     az storage account list --resource-group "$resource_group" \
       --query "[].primaryEndpoints.blob" -o tsv 2>/dev/null \
@@ -232,6 +247,8 @@ discover_probe_hosts() {
     az acr list --resource-group "$resource_group" \
       --query "[].loginServer" -o tsv 2>/dev/null || true
   } | sed '/^$/d' | sort -u > "$hosts_file"
+
+  rm -f "$endpoints_file"
 }
 
 extract_first_json_object() {
@@ -269,6 +286,7 @@ with open(path, encoding="utf-8") as f:
     doc = json.load(f)
 
 failures: list[str] = []
+non_failing_statuses = {None, "ok", "warn"}
 
 agent_status = doc.get("status")
 if agent_status == "handler_error":
@@ -276,9 +294,14 @@ if agent_status == "handler_error":
 elif agent_status == "partial":
     failures.append("diagnostic agent reported a partial result")
 
+for section_error in doc.get("section_errors") or []:
+    failures.append(f"section {section_error.get('section')} failed: {section_error.get('err')}")
+
 results = doc.get("results") or []
 host_results = [result for result in results if (result.get("target") or {}).get("host")]
-if not host_results:
+checks = doc.get("checks") or {}
+legacy_hosts = checks.get("hosts") or []
+if not host_results and not legacy_hosts:
     failures.append("diagnostic response did not include any host probes")
 
 results_by_host: dict[str, list[dict]] = {}
@@ -306,6 +329,33 @@ for public_result in (result for result in results if result.get("probe") == "eg
         failures.append(
             f"public probe {(public_result.get('target') or {}).get('url')} failed: "
             f"{public_result.get('summary') or public_result.get('findings') or public_result}"
+        )
+
+for host_result in legacy_hosts:
+    host = host_result.get("host", "<unknown>")
+    dns = host_result.get("dns") or {}
+    tcp = host_result.get("tcp_443") or {}
+    tls = host_result.get("tls_443") or {}
+    http = host_result.get("http_get") or {}
+    http_status = http.get("code") if http.get("status") == "ok" else http.get("status")
+    print(f"- {host}: dns={dns.get('status')} tcp={tcp.get('status')} tls={tls.get('status')} http={http_status}")
+
+    for layer_name, layer in (("dns", dns), ("tcp_443", tcp), ("tls_443", tls)):
+        if layer.get("status") not in non_failing_statuses:
+            failures.append(
+                f"{host} {layer_name} failed: {layer.get('err') or layer.get('msg') or layer.get('hint') or layer}"
+            )
+
+    if http and http.get("status") not in non_failing_statuses:
+        failures.append(
+            f"{host} http_get failed: {http.get('err') or http.get('msg') or http.get('hint') or http}"
+        )
+
+for public_result in checks.get("public_hosts") or []:
+    if public_result.get("status") not in non_failing_statuses:
+        failures.append(
+            f"public probe {public_result.get('url')} failed: "
+            f"{public_result.get('err') or public_result.get('msg') or public_result}"
         )
 
 summary = doc.get("summary") or {}
@@ -390,7 +440,10 @@ fi
 account_name="$(sed -nE 's|.*/accounts/([^/]+)/projects/.*|\1|p' <<<"$project_id")"
 project_name="$(sed -nE 's|.*/projects/([^/]+)$|\1|p' <<<"$project_id")"
 account_id="$(sed -nE 's|(.*?/accounts/[^/]+)/projects/.*|\1|p' <<<"$project_id")"
-project_endpoint="https://${account_name}.services.ai.azure.com/api/projects/${project_name}"
+project_endpoint="$(az resource show --ids "$project_id" --query "properties.endpoints.\"AI Foundry API\"" -o tsv 2>/dev/null || true)"
+if [ -z "$project_endpoint" ] || [ "$project_endpoint" = "null" ]; then
+  project_endpoint="https://${account_name}.services.ai.azure.com/api/projects/${project_name}"
+fi
 
 echo "Deployment file: $deployment_file"
 echo "Resource group:  $resource_group"
