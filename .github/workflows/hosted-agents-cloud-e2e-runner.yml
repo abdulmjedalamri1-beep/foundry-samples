@@ -290,12 +290,32 @@ jobs:
             "$PREFLIGHT_DIR/toolbox-versions-list-help.log" azd ai toolbox versions list --help
           echo "✅ azd ai toolbox supports list/version verification and project-scoped cleanup"
 
-      - name: Azure login (OIDC)
-        uses: azure/login@v2
+      # Keep azure/login as the first attempt so its supported OIDC flow and
+      # post-job account cleanup remain in place. A transient ARM response can
+      # make `az login` fail while parsing the subscription list, so record the
+      # outcome and retry it below instead of failing the cell immediately.
+      - name: Azure login (OIDC) · attempt 1/3
+        id: azure_login
+        continue-on-error: true
+        uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ matrix.use_westus2 == 'true' && vars.TOOLBOX_SUBSCRIPTION_ID_WESTUS2 || vars.AZURE_SUBSCRIPTION_ID }}
+
+      # This is the definitive authentication gate when attempt 1 fails. If
+      # attempt 3 also fails, the step fails the job and normal downstream
+      # steps skip through GitHub Actions' implicit success() condition.
+      - name: Retry Azure login (OIDC) · attempts 2-3/3
+        id: azure_login_retry
+        if: steps.azure_login.outcome == 'failure'
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ matrix.use_westus2 == 'true' && vars.TOOLBOX_SUBSCRIPTION_ID_WESTUS2 || vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_LOGIN_MAX_ATTEMPTS: 3
+          AZURE_LOGIN_RETRY_BACKOFF_SECONDS: 15
+        run: "${{ github.workspace }}/.github/scripts/retry-azure-oidc-login.sh"
 
       - name: Configure azd to use az CLI auth
         run: |
@@ -1673,7 +1693,7 @@ jobs:
 
       # ── Validate: status ─────────────────────────────────────────────
       - name: Check agent status
-        if: always()
+        if: always() && (steps.azure_login.outcome == 'success' || steps.azure_login_retry.outcome == 'success')
         working-directory: /tmp/ci-${{ matrix.combo_id }}
         run: |
           azd ai agent show --no-prompt -o json 2>&1 | tee /tmp/agent-status.txt
@@ -1682,7 +1702,7 @@ jobs:
 
       # ── Validate: monitoring and per-sample assertions ───────────────
       - name: Check agent logs and feature assertions
-        if: always()
+        if: always() && (steps.azure_login.outcome == 'success' || steps.azure_login_retry.outcome == 'success')
         working-directory: /tmp/ci-${{ matrix.combo_id }}
         env:
           TOOLBOX_LABEL: ${{ matrix.toolbox_label }}
@@ -1788,7 +1808,7 @@ jobs:
 
       # ── Cleanup: delete session ───────────────────────────────────────────
       - name: Delete agent session
-        if: always()
+        if: always() && (steps.azure_login.outcome == 'success' || steps.azure_login_retry.outcome == 'success')
         working-directory: /tmp/ci-${{ matrix.combo_id }}
         continue-on-error: true
         run: |
@@ -1802,7 +1822,7 @@ jobs:
       # passing validation result while leaking a toolbox. The next-run orphan
       # janitor is reserved for hard cancellation or runner loss.
       - name: Delete temporary toolboxes
-        if: always()
+        if: always() && (steps.azure_login.outcome == 'success' || steps.azure_login_retry.outcome == 'success')
         run: |
           if [ ! -f "$CI_TOOLBOX_STATE_FILE" ] || [ "$(jq '.toolboxes | length' "$CI_TOOLBOX_STATE_FILE")" -eq 0 ]; then
             echo "No cell-owned toolboxes to delete."
@@ -1893,7 +1913,7 @@ jobs:
 
       # ── Teardown (only when provision created resources) ─────────────
       - name: Teardown Azure resources
-        if: always() && vars.SKIP_PROVISION != 'true'
+        if: always() && (steps.azure_login.outcome == 'success' || steps.azure_login_retry.outcome == 'success') && vars.SKIP_PROVISION != 'true'
         working-directory: /tmp/ci-${{ matrix.combo_id }}
         run: |
           echo "Tearing down azd environment: $AZD_ENV_NAME"

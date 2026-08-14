@@ -28,12 +28,14 @@ on:
       - ".github/scripts/prepare-hosted-agent-ci-toolboxes.sh"
       - ".github/scripts/cleanup-hosted-agent-ci-toolboxes.sh"
       - ".github/scripts/hosted-agent-retry.sh"
+      - ".github/scripts/retry-azure-oidc-login.sh"
       - ".github/scripts/hosted_agent_fixture.py"
       - ".github/scripts/hosted_agent_test_spec.py"
       - ".github/scripts/invoke_hosted_agent_responses.py"
       - ".github/scripts/collect-hosted-agent-traces.py"
       - ".github/tests/test-hosted-agent-ci-toolboxes.sh"
       - ".github/tests/test-hosted-agent-session-quota.sh"
+      - ".github/tests/test-retry-azure-oidc-login.sh"
       - ".github/tests/test_hosted_agent_fixture.py"
       - ".github/tests/test_hosted_agent_test_spec.py"
       - "internal/tools/samples-hosted-agents/**"
@@ -47,12 +49,14 @@ on:
       - ".github/scripts/prepare-hosted-agent-ci-toolboxes.sh"
       - ".github/scripts/cleanup-hosted-agent-ci-toolboxes.sh"
       - ".github/scripts/hosted-agent-retry.sh"
+      - ".github/scripts/retry-azure-oidc-login.sh"
       - ".github/scripts/hosted_agent_fixture.py"
       - ".github/scripts/hosted_agent_test_spec.py"
       - ".github/scripts/invoke_hosted_agent_responses.py"
       - ".github/scripts/collect-hosted-agent-traces.py"
       - ".github/tests/test-hosted-agent-ci-toolboxes.sh"
       - ".github/tests/test-hosted-agent-session-quota.sh"
+      - ".github/tests/test-retry-azure-oidc-login.sh"
       - ".github/tests/test_hosted_agent_fixture.py"
       - ".github/tests/test_hosted_agent_test_spec.py"
       - "internal/tools/samples-hosted-agents/**"
@@ -143,6 +147,9 @@ jobs:
 
       - name: Test hosted-agent session quota helpers
         run: .github/tests/test-hosted-agent-session-quota.sh
+
+      - name: Test Azure OIDC login retry
+        run: .github/tests/test-retry-azure-oidc-login.sh
 
       - name: Validate sample structure
         run: |
@@ -438,7 +445,7 @@ jobs:
             # changed-sample filter emitted an empty matrix, so runner changes
             # were never validated before merge.
             test_all="false"
-            if echo "$changed_files" | grep -qE '^\.github/(workflows/hosted-agents-cloud-e2e(-runner)?\.yml|scripts/((prepare|cleanup)-hosted-agent-ci-toolboxes|hosted-agent-retry)\.sh|scripts/(hosted_agent_fixture|hosted_agent_test_spec|invoke_hosted_agent_responses|collect-hosted-agent-traces)\.py|tests/test-hosted-agent-(ci-toolboxes|session-quota)\.sh|tests/test_hosted_agent_(fixture|test_spec)\.py)$'; then
+            if echo "$changed_files" | grep -qE '^\.github/(workflows/hosted-agents-cloud-e2e(-runner)?\.yml|scripts/((prepare|cleanup)-hosted-agent-ci-toolboxes|hosted-agent-retry|retry-azure-oidc-login)\.sh|scripts/(hosted_agent_fixture|hosted_agent_test_spec|invoke_hosted_agent_responses|collect-hosted-agent-traces)\.py|tests/(test-hosted-agent-(ci-toolboxes|session-quota)|test-retry-azure-oidc-login)\.sh|tests/test_hosted_agent_(fixture|test_spec)\.py)$'; then
               test_all="true"
               echo "Hosted-agent E2E infrastructure changed — testing the full matrix"
             fi
