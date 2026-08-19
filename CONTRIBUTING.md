@@ -1,5 +1,15 @@
 # Contributing to Foundry Samples
 
+> **August 25: one simpler home for Foundry samples**
+>
+> Beginning August 25, 2026, we're moving published sample contributions to
+> [`microsoft-foundry/foundry-samples`](https://github.com/microsoft-foundry/foundry-samples)
+> so sample authors and reviewers can collaborate in one clear, shared place.
+> Until August 25, continue using the current contribution process.
+> This private repository will remain available for internal work at the cutover date,
+> but the sync automation that carries changes to the public repo will be disabled. We'll
+> share any next steps for in-flight contributions before the change takes effect.
+
 > **Last updated:** 2026-08-03 — added the reproducible dependency policy for Python Hosted Agent samples.
 
 This is the **private staging repository** for Microsoft Foundry documentation samples. Changes merged here are automatically synced to the public [`microsoft-foundry/foundry-samples`](https://github.com/microsoft-foundry/foundry-samples) repository on a nightly basis.
