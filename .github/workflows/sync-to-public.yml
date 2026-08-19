@@ -1,12 +1,6 @@
 name: Sync to Public Repo
 
 on:
-  schedule:
-    - cron: '0 6 * * *' # Nightly at 6:00 UTC
-  push:
-    branches: [main]
-    paths:
-      - '.github/sync-mailmap'   # auto-retry after fix-unmapped-emails PR merges
   workflow_dispatch:
     inputs:
       dry_run:
