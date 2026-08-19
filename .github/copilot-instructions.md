@@ -1,3 +1,20 @@
+## Temporary public contribution cutover notice (through August 25, 2026)
+
+Until this temporary guidance is replaced at activation time:
+
+- On the first substantive turn in a session involving private-repository work that may be intended for publication, proactively tell the driving human once that beginning August 25, published Foundry sample contributions move to `microsoft-foundry/foundry-samples`; until then, they should continue the current contribution process.
+- Surface that contributor-facing message only once per session. Do not repeat it on later turns.
+- When you create or materially update a private PR intended for publication, add the exact Markdown notice below to the PR body if the marker `<!-- p5-public-cutover-notice -->` is absent.
+- Prefer updating the PR body over posting a separate PR comment. Do not add a standalone comment when the body can be updated.
+- Never add the notice to bot PRs, internal-only work, or PRs that already carry the marker.
+- Treat this as best-effort contributor signaling only. It does not authorize early routing changes, merges, sync triggers, or settings changes.
+
+Add this exact Markdown to qualifying PR bodies (without a surrounding code fence):
+
+**Upcoming contribution change:** Beginning August 25, published Foundry sample contributions will move to [`microsoft-foundry/foundry-samples`](https://github.com/microsoft-foundry/foundry-samples) so sample work has one clear, shared home. Until then, continue using the current contribution process. We'll confirm any next step for this work before cutover.
+
+<!-- p5-public-cutover-notice -->
+
 ## Files owned by the AI Platform Docs team
 
 If a file is listed in the CODEOWNERS file with @azure-ai-foundry/ai-platform-docs as the owner, it is owned by the AI Platform Docs team.  For these files:
