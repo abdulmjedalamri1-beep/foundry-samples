@@ -421,9 +421,9 @@ Two systems work together to keep unmapped internal emails off the public repo:
 
 **System A — pre-merge gate (`mailmap-precheck.yml`):** Runs on every PR targeting `main`. Scans author, committer, and trailer emails in the PR's commits against `.github/sync-mailmap`. If an unmapped `@microsoft.com` email is found, the check (`Check author/committer/trailer emails`) fails and the PR is blocked. The contributor must add their own mailmap entry before the PR can merge. This is a required status check enforced by the `main` branch ruleset.
 
-**System B — post-merge safety net (`fix-unmapped-emails.yml`):** Triggers when Sync-to-Public fails. Scans commits reachable from `HEAD` (default branch only — not open PR branches) for unmapped emails, then opens or updates an `auto/fix-unmapped-emails-*` PR with the missing entries. This handles any email that escaped the pre-merge gate (e.g., during the window before the gate was enforced).
+**System B — manual remediation (`fix-unmapped-emails.yml`):** Runs only when manually dispatched. It scans commits reachable from `HEAD` (default branch only — not open PR branches) for unmapped emails, then opens or updates an `auto/fix-unmapped-emails-*` PR with the missing entries. This handles any email that escaped the pre-merge gate (e.g., during the window before the gate was enforced) without reacting automatically to a reviewed sync failure.
 
-The two systems are complementary: System A prevents the problem at PR time; System B catches anything that slipped through and auto-builds the fix. If Sync-to-Public fails with `Unmapped internal email`, see §6 of [sync-incident-response.md](../skills/sync-incident-response.md) for recovery steps.
+The two systems are complementary: System A prevents the problem at PR time; System B can build the fix during a manually reviewed incident. If Sync-to-Public fails with `Unmapped internal email`, see §6 of [sync-incident-response.md](../skills/sync-incident-response.md) for recovery steps.
 
 ## Authentication
 
@@ -524,7 +524,7 @@ If the sentinel is absent (e.g., a cache restored from a pre-sentinel run), reco
 
 ## Drift Verification
 
-A separate workflow, `.github/workflows/verify-sync.yml`, runs after each sync and on demand to confirm that the public repo's `main` matches what private `main` *should* have produced.
+A separate workflow, `.github/workflows/verify-sync.yml`, runs only when manually dispatched to confirm that the public repo's `main` matches what private `main` *should* have produced.
 
 The check is intentionally narrow:
 

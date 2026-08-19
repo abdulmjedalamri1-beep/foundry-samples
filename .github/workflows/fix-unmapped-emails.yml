@@ -1,9 +1,6 @@
 name: Fix Unmapped Emails
 
 on:
-  workflow_run:
-    workflows: ["Sync to Public Repo"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       scan_range:
@@ -19,18 +16,14 @@ permissions:
 jobs:
   detect-and-fix:
     runs-on: ubuntu-latest
-    # Only run on sync failure (or manual dispatch)
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'failure' }}
     steps:
       - name: Checkout default branch (trusted code path)
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
-        # SECURITY: Pin to default branch, not the triggering SHA.  This is a
-        # privileged workflow (workflow_run + contents/PR write + SYNC_APP token).
-        # Pinning to an attacker-controllable SHA (e.g. github.event.workflow_run.head_sha)
-        # would let a malicious commit inject code into the scripts we run here.
+        # SECURITY: This workflow has contents/PR write plus a SYNC_APP token.
+        # Pinning to the default branch keeps privileged execution on trusted code.
         # (CodeQL: actions/untrusted-checkout/critical)
         #
         # NOTE: `fetch-depth: 0` fetches full history of the default branch but
@@ -60,10 +53,8 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           MAILMAP_FILE: .github/sync-mailmap
           SCAN_RANGE: ${{ inputs.scan_range }}
-          # Human-readable trigger label embedded in the auto-generated PR
-          # body / comment so reviewers know whether this run came from a
-          # failed sync or a manual dispatch.
-          TRIGGER_LABEL: ${{ github.event_name == 'workflow_dispatch' && 'manual dispatch' || 'Sync to Public Repo failure' }}
+          # Human-readable trigger label embedded in the auto-generated PR.
+          TRIGGER_LABEL: manual dispatch
           # Hard contract per ADO 5356762: auto/fix-unmapped-emails-* branches
           # are append-only. The orchestrator must NOT force-push — when an
           # open auto-fix PR exists, new entries are appended as a new commit

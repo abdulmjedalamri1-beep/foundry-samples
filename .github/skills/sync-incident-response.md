@@ -196,8 +196,8 @@ The "Run sync pipeline" step fails with:
 Unmapped internal email: <alias> <email@microsoft.com>
 ```
 
-The `fix-unmapped-emails` workflow also fires after a sync failure and may have already
-opened a mailmap fix PR.
+The `fix-unmapped-emails` workflow is manual-only during the public-first cutover. It
+opens or updates a mailmap fix PR only when an operator dispatches it.
 
 ### What happened
 
@@ -216,11 +216,12 @@ email addresses to the public repo.
    ```bash
    gh pr list --repo microsoft-foundry/foundry-samples-pr --search "fix-unmapped-emails" --state open
    ```
-2. **If a PR is open:** review and merge it. The sync re-triggers automatically when the
-   mailmap push lands on `main` — no manual dispatch needed.
-3. **If no PR exists (manual fix):** add the entry to `.github/sync-mailmap`, open a PR,
-   and merge it. The push-triggered sync runs automatically.
-4. **Verify:** watch the sync run triggered by the mailmap push. It should succeed cleanly.
+2. **If no PR exists:** manually dispatch `fix-unmapped-emails.yml` with the default
+   `scan_range`, then check again for the generated PR.
+3. **If a PR is open:** review and merge it. If the workflow cannot resolve the missing
+   identity, add the entry to `.github/sync-mailmap` in a manually reviewed PR instead.
+4. **Verify:** rerun the reviewed sync procedure manually, starting with `dry_run=true`.
+   Neither a sync failure nor a push to `main` triggers an automatic retry.
 
 ### Prevention
 

@@ -23,7 +23,7 @@
 # This script is the shared detection logic used by:
 #   - .azure-pipelines/validation.yml (PR gate)
 #   - .github/workflows/sync-to-public.yml (pre-sync check)
-#   - .github/workflows/fix-unmapped-emails.yml (self-healing)
+#   - .github/workflows/fix-unmapped-emails.yml (manual remediation)
 
 set -euo pipefail
 
