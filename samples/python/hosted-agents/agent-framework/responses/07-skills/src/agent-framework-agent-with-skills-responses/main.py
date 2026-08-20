@@ -18,6 +18,7 @@ from agent_framework import (
 )
 from agent_framework.foundry import FoundryChatClient
 from agent_framework_foundry_hosting import ResponsesHostServer
+from azure.ai.agentserver.core.tasks import set_resilient_tasks_enabled
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 
@@ -100,6 +101,8 @@ def main():
         default_options={"store": False},
     )
 
+    # Work around missing resilient-task initialization in the hosted Responses adapter.
+    set_resilient_tasks_enabled(True)
     server = ResponsesHostServer(agent)
     server.run()
 
