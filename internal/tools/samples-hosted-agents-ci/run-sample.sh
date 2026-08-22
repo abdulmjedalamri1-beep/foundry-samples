@@ -96,9 +96,13 @@ ensure_azd() {
 
 prepare_payload_file() {
   local payload_file
-  local sample_dir_name
-  sample_dir_name="$(basename "$sample_path")"
-  payload_file="$repo_root/internal/tools/samples-hosted-agents/$language/$protocol/$sample_dir_name/test-payload.txt"
+  local sample_rel
+  # Fixtures live under the complete sample path below <language>/hosted-agents/
+  # (e.g. bring-your-own/invocations/hello-world), not just the basename. Using
+  # only "$protocol/$(basename)" misses them, so the generic fallback payload was
+  # sent to every sample, breaking handlers that expect a specific request shape.
+  sample_rel="${sample_path##*/hosted-agents/}"
+  payload_file="$repo_root/internal/tools/samples-hosted-agents/$language/$sample_rel/test-payload.txt"
 
   if [ -f "$payload_file" ]; then
     printf '%s\n' "$payload_file"
