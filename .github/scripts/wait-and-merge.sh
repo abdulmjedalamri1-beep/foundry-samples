@@ -5,14 +5,9 @@
 # then merges it directly via `gh pr merge --rebase`.
 #
 # WHY DIRECT MERGE INSTEAD OF `gh pr merge --auto`:
-#   GitHub's auto-merge runs as a system process at merge time, which does NOT
-#   inherit the calling app's ruleset bypass. When this script runs from the
-#   sync workflow, GH_TOKEN is the foundry-samples-repo-sync app token, so
-#   calling `gh pr merge --rebase` directly merges *as the app*, and the app's
-#   bypass actor entry on the main branch ruleset applies (including
-#   pull_request rule sub-flags like require_last_push_approval and
-#   required_approving_review_count).
-#   See https://github.com/microsoft-foundry/foundry-samples-pr/issues/195
+#   The sync workflow must observe the merge before it saves marks. Polling and
+#   merging within the run keeps that ordering explicit and avoids deferred
+#   auto-merge state that would require open-PR/marks reconciliation.
 #
 # Args:
 #   $1  PR_URL  — full PR URL or number (passed through to gh)
@@ -67,24 +62,13 @@ while :; do
     sleep "$POLL_INTERVAL"
 done
 
-# Direct merge — runs as the app, so the app's ruleset bypass applies.
-# Do NOT use --auto here (defeats the whole point of this script) and do NOT
-# use --admin (would require the caller to be a bypass actor personally).
+# Direct merge runs as the App and remains subject to the public main ruleset.
+# Do not use --auto (the workflow must observe the merge) or --admin.
 #
-# Prefer --rebase to preserve linear history in normal syncs. Fall back to
-# --squash when rebase is rejected — this happens for force_full=true runs
-# because their sync branch has no common ancestor with public main (orphan
-# history), and GitHub rejects rebase merges on unrelated histories with:
-#   "This branch can't be rebased (mergePullRequest)"
-# A squash merge produces a single commit on main and is the only viable
-# strategy in that case. Recovery-only path; routine syncs stay on rebase.
+# Rebase is the only supported merge strategy. An unrelated-history branch is
+# not an incremental sync and must fail rather than land as a tree replacement.
 if ! gh pr merge "$PR_URL" --repo "$REPO" --rebase 2> /tmp/merge_err; then
-    if grep -q "can't be rebased" /tmp/merge_err; then
-        echo "::warning::Rebase rejected (likely force_full orphan history); falling back to --squash."
-        gh pr merge "$PR_URL" --repo "$REPO" --squash
-    else
-        cat /tmp/merge_err >&2
-        exit 1
-    fi
+    cat /tmp/merge_err >&2
+    exit 1
 fi
 echo "Merged: $PR_URL"

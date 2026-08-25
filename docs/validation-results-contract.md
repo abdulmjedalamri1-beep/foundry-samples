@@ -43,7 +43,7 @@ For `main` HEAD freshness:
 - Trigger on `push` to `main`.
 - Optionally add a schedule to refresh results when platform dependencies, SDKs, credentials, or live resources drift without a repo change.
 
-The sync gate reads statuses from the private repo commit it is syncing. For the normal nightly sync, that is `main` HEAD in `foundry-samples-pr`.
+The sync gate reads statuses from the private repo commit it is syncing. For a manually dispatched sync, that is `main` HEAD in `foundry-samples-pr`.
 
 ### Status context naming
 

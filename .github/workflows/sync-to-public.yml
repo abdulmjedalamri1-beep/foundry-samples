@@ -8,11 +8,6 @@ on:
         required: false
         type: boolean
         default: false
-      force_full:
-        description: 'Force a full re-export (discards marks cache).'
-        required: false
-        type: boolean
-        default: false
       seed_from_public_sha:
         description: 'Public main commit SHA to graft from when seeding paired sync marks for recovery.'
         required: false
@@ -275,7 +270,6 @@ jobs:
           SYNC_BRANCH: ${{ steps.branch.outputs.name }}
           SOURCE_REF: HEAD
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
-          FORCE_FULL: ${{ inputs.force_full && '1' || '0' }}
           SYNC_BLOCKED_PATHS: ${{ steps.blocklist.outputs.blocklist }}
           SYNC_BLOCKED_UNMAPPED: ${{ steps.unmapped-blocklist.outputs.blocklist }}
         run: |
@@ -287,18 +281,6 @@ jobs:
               export SYNC_BLOCKED_PATHS="${SYNC_BLOCKED_UNMAPPED}"
             fi
           fi
-
-          # Single source of truth for the effective block-list (ADO 5418305):
-          # this is the exact set sync-core.sh uses to build SYNC_TREE. The
-          # force_full reseed guard must exclude the same paths the export did, so
-          # it consumes THIS value — never a re-derived one. Multiline form
-          # matches the other blocklist outputs and survives any newline in the
-          # value that would corrupt the single-line key=value format.
-          {
-            echo "effective_blocklist<<EOF"
-            echo "${SYNC_BLOCKED_PATHS:-}"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
 
           bash private-repo/.github/scripts/sync-core.sh
 
@@ -331,7 +313,7 @@ jobs:
           done
 
       - name: Create PR and merge directly as sync app
-        if: ${{ inputs.dry_run != true && steps.sync.outputs.has_changes == 'true' && inputs.force_full != true }}
+        if: ${{ inputs.dry_run != true && steps.sync.outputs.has_changes == 'true' }}
         working-directory: public-repo
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -350,7 +332,7 @@ jobs:
 
           **Validation gate:** mode=\`${{ steps.bypass-validate.outputs.mode }}\`; tracked=${{ steps.blocklist.outputs.tracked_count }}; blocked=${{ steps.blocklist.outputs.blocked_count }}.
 
-          **Rollback point:** \`${ROLLBACK_SHA}\` — to revert, force-push this SHA to \`main\` and clear the sync-marks cache.
+          **Pre-sync public SHA:** \`${ROLLBACK_SHA}\`. Recover through a reviewed private fix plus dry-run and normal incremental sync; do not push directly to public \`main\`.
 
           Triggered by: \`${{ github.event_name }}\`
           Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -373,54 +355,16 @@ jobs:
 
           echo "Created: $PR_URL"
 
-          # Use wait-and-merge.sh (poll-then-direct-merge) instead of
-          # `gh pr merge --auto`. Auto-merge fires from a system process that
-          # does NOT inherit the app's ruleset bypass; calling `gh pr merge`
-          # directly here merges as the app token so the bypass applies.
-          # Background: foundry-samples-pr#195
+          # Poll and merge within this run so marks are saved only after the
+          # public main update succeeds. The App remains subject to the public
+          # main ruleset; this is not an admin or bypass merge.
           bash "$GITHUB_WORKSPACE/private-repo/.github/scripts/wait-and-merge.sh" \
             "$PR_URL" "$REPO"
 
-      # force_full direct-push: when force_full=true, the sync branch is an
-      # orphan (no common ancestor with public main). Normal PR merge flows
-      # fail because GitHub can't compute a clean merge/rebase across unrelated
-      # histories with conflicting paths. Instead, we create a new commit on
-      # main whose tree matches the sync branch tip (a "tree-replacement"
-      # commit), augmented with protected files from current main (e.g.
-      # .github/workflows/* which are excluded from export). This preserves
-      # git history while resetting content to match private's canonical state.
-      - name: Force-full direct push to main
-        id: force-full-push
-        if: ${{ inputs.dry_run != true && steps.sync.outputs.has_changes == 'true' && inputs.force_full == true }}
-        working-directory: public-repo
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PUBLIC_REPO: ${{ github.workspace }}/public-repo
-          PRIVATE_REPO: ${{ github.workspace }}/private-repo
-          CONFIG_FILE: ${{ github.workspace }}/private-repo/.github/sync-config.json
-          SYNC_BRANCH: ${{ steps.branch.outputs.name }}
-          MAIN_REF: origin/main
-          MARKS_DIR: ${{ github.workspace }}/marks-dir
-          # Effective block-list the export used (ADO 5418305) — threaded so the
-          # reseed guard excludes the same paths and never false-fails.
-          SYNC_BLOCKED_PATHS: ${{ steps.sync.outputs.effective_blocklist }}
-          COMMIT_COUNT: ${{ steps.sync.outputs.commit_count }}
-          AUTHORS: ${{ steps.sync.outputs.authors }}
-          ROLLBACK_SHA: ${{ steps.sync.outputs.public_head_before }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          bash "${{ github.workspace }}/private-repo/.github/scripts/force-full-direct-push.sh"
-
       - name: Save marks cache
-        # inputs.seed_from_public_sha is declared in sibling PR-B ("Add seed-marks-from-public recovery primitive").
-        # It is intentionally falsy on cron and pre-graft workflow_dispatch runs, so this gate matches today's behavior until PR-B lands.
-        #
-        # Poisoning gate (ADO 5418305): this step has NO status-check function in
-        # its `if:`, so GitHub implicitly ANDs it with success(). A failed
-        # "Force-full direct push to main" (reseed guard fail-closed) therefore
-        # SKIPS this save — the poisoned marks are never persisted. Do NOT add
-        # `if: always()` or reorder this before the force-full step, or force_full
-        # cache poisoning re-opens. Test T79 locks the script-level equivalent.
+        # Keep this after the in-run public merge. GitHub implicitly ANDs this
+        # condition with success(), so failed sync or merge steps never persist
+        # marks. Seed-only recovery runs may save even when no content changed.
         if: ${{ inputs.dry_run != true && (steps.sync.outputs.has_changes == 'true' || inputs.seed_from_public_sha != '') }}
         uses: actions/cache/save@v4
         with:

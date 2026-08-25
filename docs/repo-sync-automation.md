@@ -7,7 +7,7 @@ It owns the **sync workflow mechanics**: export/import, path exclusions, author 
 ## Overview
 
 ```text
-foundry-samples-pr (private)  ──── daily sync ────►  foundry-samples (public)
+foundry-samples-pr (private)  ─── manual sync ────►  foundry-samples (public)
        ▲                                                   │
        │  Authors push here                                │  Customers read here
        │  Validation statuses live here                    │  Issues filed here
@@ -17,7 +17,7 @@ foundry-samples-pr (private)  ──── daily sync ────►  foundry-s
 
 - **Primary direction**: Private → Public. Private `main` remains the authoritative integration point.
 - **Mirror-back exception**: Non-sync-App commits that land directly on public `main` open review PRs back to private; they are never auto-merged.
-- **Schedule**: Daily at 06:00 UTC + manual dispatch for private→public sync; push to public `main` + manual dispatch for public→private mirror-back.
+- **Trigger**: Manual `workflow_dispatch` only for private→public sync; push to public `main` + manual dispatch for public→private mirror-back.
 - **Mechanism**: private→public uses `git fast-export` / `git fast-import` with path filtering and author rewriting; public→private replays individual public commits as private PR branches.
 - **Validation gate**: Before push, the sync gate filters out samples whose validation has not passed at the private `main` SHA being synced.
 - **Automation**: GitHub Actions workflow in `.github/workflows/sync-to-public.yml` for private→public, plus public-overlay workflow `.github/workflows/mirror-back.yml` for public→private PR creation.
@@ -66,9 +66,9 @@ The filtered stream is imported into the public repo via `git fast-import`, crea
 
 The pipeline uses `git fast-export` / `fast-import` marks files to track what's already been synced. These are cached between runs, making subsequent syncs incremental — only new commits are processed.
 
-If marks are unavailable or `force_full` is specified, a full re-export is performed.
+The first publication to an empty public repository performs a bootstrap export. Once public `main` exists, missing, invalid, or incompatible marks fail closed before any remote mutation. Recovery must use `seed_from_public_sha` (and, when needed, `seed_from_private_sha`) to establish a verified incremental anchor.
 
-Dynamic gate exclusions are per-run state, not durable repo policy. When a blocked sample later becomes unblocked, the next sync must include the now-eligible content. If marks interaction prevents that from happening cleanly, force a full re-export.
+Dynamic gate exclusions are per-run state, not durable repo policy. When a blocked sample later becomes unblocked, the next incremental sync includes the now-eligible changes without replacing the public tree.
 
 ### 5. Push and PR
 
@@ -182,8 +182,8 @@ Dynamic validation exclusions are generated at sync time. They must not be added
 Semantics and rationale:
 
 - **Where it runs.** `sync-core.sh` reads `exclude_basenames` (`build_filter_exclude_basenames`) and passes each as `filter-stream.py --exclude-basename`, alongside the prefix-based `--exclude-path` args. Like prefix exclusions, this filters file-op deltas (M/D/R/C) in delta mode, so the next `fast-import` inherits any prior content for those paths from the marks-anchored parent.
-- **Not folded into `pathspec.hash`.** Unlike `exclude_pathspecs`, changing `exclude_basenames` does **not** invalidate the marks cache. This is deliberate: a hash change forces a full re-export that, without a paired re-anchor, produces an orphan branch and trips the [Protected-paths guard](#protected-paths-guard). Basename excludes therefore take effect on the next incremental sync without that disruption — matching how the dynamic block-list is handled.
-- **No retroactive removal.** Because excluded-path content is inherited from the parent, adding a basename only stops *future* syncing of matching files. Marker files already present on public are left in place until removed out-of-band (e.g. deleted directly on public, or a controlled `force_full` re-anchor). New marker files added in private after this list is in effect are never synced.
+- **Not folded into `pathspec.hash`.** Unlike `exclude_pathspecs`, changing `exclude_basenames` does **not** invalidate the marks cache. This is deliberate: changing the durable static include-set requires a reviewed seed re-anchor, while basename exclusions are safe to apply as incremental delta filters. Basename excludes therefore take effect on the next incremental sync without disrupting the marks anchor — matching how the dynamic block-list is handled.
+- **No retroactive removal.** Because excluded-path content is inherited from the parent, adding a basename only stops *future* syncing of matching files. Marker files already present on public remain public-owned and must be changed through a reviewed public PR when cleanup is required. New marker files added in private after this list is in effect are never synced.
 - **Drift checks.** `verify-sync.sh` applies the same basenames bidirectionally, so neither private nor public marker files register as drift.
 
 
@@ -356,8 +356,8 @@ for completeness:
    `seed_from_public_sha=<current-public-main-HEAD-SHA>`. The
    `seed-marks-from-public.sh` step validates tree-equivalence over the
    include-set (which excludes `.github/`, so workflow content does not
-   participate in the check) and re-pairs the marks. The next scheduled
-   sync resumes with re-anchored marks; the protected workflow blob now
+   participate in the check) and re-pairs the marks. The next manually
+   dispatched sync resumes with re-anchored marks; the protected workflow blob now
    matches public main, and the guard passes.
 
 3. **Do not bypass by directly editing `protected_paths`.** Removing a
@@ -442,7 +442,6 @@ The status-reading step queries statuses in the private repo. It should use cred
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `dry_run` | boolean | `false` | Builds sync branch and pushes, but does NOT create a PR or update marks cache |
-| `force_full` | boolean | `false` | Discards marks cache and performs a full re-export |
 | `seed_from_public_sha` | string | `''` | Recovery-only input: public `main` SHA to graft from when synthesizing paired marks |
 | `seed_from_private_sha` | string | `''` | Recovery-only input: private `main` SHA to graft from. Defaults to private `HEAD` when empty. Use when `seed_from_public_sha` corresponds to a private SHA older than current `HEAD` (e.g., commits landed on private after public last synced). |
 | `seed_blocked_paths` | string | `''` | Recovery-only input: override `SYNC_BLOCKED_PATHS` for the seed-marks tree-equivalence check. Colon-separated repo-relative sample paths. Use when `seed_from_public_sha` was produced by a sync that excluded paths via a historical block-list that differs from the current one; otherwise seed-marks will fail tree-equivalence on the historically-blocked paths (private has them, public doesn't). Only takes effect when `seed_from_public_sha` is set. See [Historical block-list mismatch](#historical-block-list-mismatch). |
@@ -468,7 +467,7 @@ The include set is the normal sync include-set: everything not excluded by `.git
 
 On success, the seed step writes `private.marks`, `public.marks`, `pathspec.hash`, `root.sha`, and `last-synced-private.sha` into the marks directory, then `sync-core.sh` validates those files and runs incrementally. Expected output is a log line like `Seeded paired marks for private <sha> ↔ public <sha>`. If there are no new public-path commits after the graft point, the sync step should report `has_changes=false`; the coordinated cache-save change persists the seeded marks anyway.
 
-On tree mismatch, the script prints the diff for the diverging tree entries, exits non-zero, and leaves the marks directory unchanged. Do not bypass this failure. Either choose a public SHA whose include-set tree matches the private SHA, fix the divergence with a normal sync/PR, or use `force_full` only if the intended operation is to replace public with private's view.
+On tree mismatch, the script prints the diff for the diverging tree entries, exits non-zero, and leaves the marks directory unchanged. Do not bypass this failure. Reconcile the reviewed private-owned content through a PR, choose public/private SHAs whose include-set trees match, and rerun the seed recovery with `dry_run=true` before a real run.
 
 ### Historical block-list mismatch
 
@@ -488,7 +487,7 @@ Recovery walkthrough:
 4. `check_marks_validity` sees marks + matching state → marks valid → incremental.
 5. `git fast-export --import-marks=private.marks <private-HEAD>` emits zero commits because `private-HEAD` is already in marks.
 6. Pipeline exits with `has_changes=false`. Save step fires anyway (cache-key rotation PR gate change) → cache persisted under new key with seeded marks.
-7. Next scheduled run: cache restore matches via `restore-keys` prefix → marks + state files load → next real private commit produces clean incremental delta against public main.
+7. Next manually dispatched run: cache restore matches via `restore-keys` prefix → marks + state files load → next real private commit produces clean incremental delta against public main.
 8. "Close stale sync PRs" runs on the first real-delta sync after that and closes the stale public sync PR automatically. Alternatively, close it manually any time after step 7.
 
 ## Sync Marks Cache Lifecycle
@@ -505,9 +504,9 @@ On restore, Actions first tries the exact key for the current private `HEAD`, th
 The save step is skipped for dry runs. For non-dry runs, it saves marks when either:
 
 1. The sync produced public changes (`steps.sync.outputs.has_changes == 'true'`).
-2. A recovery seed run supplied `seed_from_public_sha`, even if that run produced no new commits, so synthesized marks can persist for the next scheduled sync.
+2. A recovery seed run supplied `seed_from_public_sha`, even if that run produced no new commits, so synthesized marks can persist for the next manual sync.
 
-`pathspec.hash` (stored alongside the marks) is computed over the **static** `exclude_pathspecs` from `sync-config.json` only. The per-run validation block-list (`SYNC_BLOCKED_PATHS`) and the static `exclude_basenames` list are intentionally **not** folded into the hash — their effect is applied at filter time via the `--exclude-path` / `--exclude-basename` args, but they should not invalidate durable marks across runs. Folding `SYNC_BLOCKED_PATHS` in would force a full re-export every time a sample's validation status flipped; folding `exclude_basenames` in would force an orphan-prone full re-export whenever a marker name is added or removed.
+`pathspec.hash` (stored alongside the marks) is computed over the **static** `exclude_pathspecs` from `sync-config.json` only. The per-run validation block-list (`SYNC_BLOCKED_PATHS`) and the static `exclude_basenames` list are intentionally **not** folded into the hash — their effect is applied at filter time via the `--exclude-path` / `--exclude-basename` args, but they should not invalidate durable marks across runs. Folding either into the hash would require seed recovery every time a sample's validation status flipped or a marker name changed, even though both are safe to apply as incremental delta filters.
 
 ### `last-synced-private.sha` sentinel
 
@@ -520,7 +519,7 @@ Sentinel lifecycle:
 - **Removed** by `check_marks_validity` whenever it discards the paired marks for any reason (stale state, pathspec mismatch, root-SHA mismatch). This prevents a stale sentinel from outliving its marks.
 - **Persisted** automatically via the existing `marks-dir` cache path — no separate cache configuration.
 
-If the sentinel is absent (e.g., a cache restored from a pre-sentinel run), recovery falls through to the legacy `discard paired marks and full-reexport` path, which is correct but expensive. After ~2–4 weeks of clean runs the legacy fallback will no longer be reachable in practice.
+If the sentinel is absent while public `main` exists, sync fails closed with `SEED_RECOVERY_REQUIRED`. Supply reviewed seed SHAs and use `dry_run=true` first; the workflow does not discard the anchor and rebuild the public tree.
 
 ## Drift Verification
 
@@ -545,8 +544,7 @@ The script is `.github/scripts/verify-sync.sh`.
 
 | Scenario | Behavior |
 |----------|----------|
-| Daily sync | Runs at 06:00 UTC. The gate consumes whatever statuses are current on private `main` HEAD at that moment. |
-| Manual sync | Same gate behavior as scheduled sync. |
+| Manual sync | Runs only through `workflow_dispatch`. The gate consumes the statuses current on private `main` HEAD at dispatch time. |
 | Sample blocked at one sync | The sample is omitted from that sync. It recovers automatically at the next sync after its validation statuses go green. |
 | Re-run validation flips status | Latest write wins for the same `(commit, context)`. A later `success` can unblock the sample for the next sync. |
 | No reporting pipeline | Grandfathered in v1; the sample syncs unless another validation context reports a block for it. |
@@ -561,21 +559,22 @@ Each run should emit a sync-time UX summary listing:
 
 For v1, workflow logs and `$GITHUB_STEP_SUMMARY` are sufficient. Phase G owns richer reporting / dashboard work.
 
-## Public Repo Branch Protection & App Bypass
+## Public Repo Branch Protection
 
-The public repo has a branch ruleset on `main` that requires PR reviews and a green required-checks set. The sync App (`foundry-samples-repo-sync`) is configured as a **bypass actor** so it can merge sync PRs without a human reviewer.
+The public repo has a branch ruleset on `main` that requires reviewed PRs and a green required-checks set. The sync workflow pushes only a sync branch, opens a public PR, waits for those requirements, and performs the rebase merge within the same run. It has no supported direct push to public `main`.
 
-There are two non-obvious things about this setup:
+`wait-and-merge.sh` deliberately does not use `gh pr merge --auto`. It polls until the PR is mergeable and required checks and reviews are satisfied, then calls `gh pr merge --rebase` while authenticated as the App. Marks are saved only after that merge succeeds.
 
-### Bypass-actor permission is not inherited by GitHub's merge queue
+### Required repository-admin action
 
-`gh pr merge --auto` does **not** merge the PR right then; it schedules the PR for GitHub's internal merge process to complete once conditions clear. That internal process runs as GitHub's system, **not** as the requesting actor — so the App's bypass permission is not applied, required-reviews is enforced, and the merge fails.
+Remove the sync App from the public `main` ruleset bypass list:
 
-The fix (implemented in `wait-and-merge.sh`) is to skip `--auto` entirely: poll until conditions are satisfied, then call `gh pr merge --rebase` directly while authenticated as the App. The merge happens immediately, as the bypass actor, and succeeds.
+1. Open `microsoft-foundry/foundry-samples` → **Settings** → **Rules** → **Rulesets**.
+2. Edit the active ruleset targeting `main` (historically ruleset ID `6131793`).
+3. Under **Bypass list**, remove `foundry-samples-repo-sync` (GitHub App ID `2846614`).
+4. Save the ruleset without removing the App installation or its branch/PR permissions.
 
-### `Require approval of the most recent reviewable push` and the App
-
-If `Require approval of the most recent reviewable push` is enabled in the ruleset, the App's own commits-as-author can re-trigger the requirement, defeating bypass. The pragmatic resolution is to keep this rule **off** while the App is the merger, and re-enable it only if the merger model changes. The rule's intent (catching last-minute pushes by an author who already self-approved) doesn't apply to a sync PR opened and merged by an App.
+This is a repository-admin configuration change and is not performed by the workflow or repository code.
 
 ## Design Decisions & Gotchas
 
@@ -595,11 +594,11 @@ A short list of things that are easy to get wrong, captured for future-you:
 
 ## Troubleshooting
 
-### Sync didn't run
+### Run a sync
 
-1. Verify the cron schedule is still `0 6 * * *`.
-2. Check GitHub Actions logs for token generation failures (App private key rotation, installation issues).
-3. Confirm the ruleset bypass-actor for the App hasn't been removed.
+1. Dispatch `sync-to-public.yml` manually.
+2. For recovery, provide reviewed seed SHAs and set `dry_run=true` first.
+3. Check GitHub Actions logs for token generation failures (App private key rotation, installation issues).
 
 ### Sync ran but pushed nothing / opened no PR
 
@@ -617,14 +616,13 @@ To verify, check:
 2. Verify the commit was on `main` before the sync ran.
 3. Check the sync run summary for validation-blocked samples.
 4. Query the private commit status for the synced SHA and inspect `validation/*` contexts.
-5. If statuses are now green, wait for the next sync or run sync manually.
+5. If statuses are now green, dispatch the sync manually.
 
 ### Sync PR opened but never merged
 
 1. Check `wait-and-merge.sh` log output for the polling loop's exit reason.
 2. Confirm required checks on the public repo all completed green.
-3. Confirm the App is still listed as a bypass actor on the `main` ruleset.
-4. If `Require approval of the most recent reviewable push` was re-enabled, the App's own pushes may be re-triggering the rule — see [Public Repo Branch Protection & App Bypass](#public-repo-branch-protection--app-bypass).
+3. Confirm required reviews have been submitted; the App must not bypass the `main` ruleset.
 
 ### Author attribution is wrong
 
@@ -660,19 +658,19 @@ If it shows the offending public SHA, mirror-back dropped a commit it should not
 
 | Scenario | Recovery |
 |----------|----------|
-| Private is correct, public regressed (run `force_full`) | `workflow_dispatch` → `force_full: true`. Full re-export; overwrites public with private's view. Safe when private is the authoritative source. |
-| Public has a legitimate change not yet in private | Bring to private via PR first, merge, then `workflow_dispatch` → `seed_from_public_sha=<public-HEAD>`. The tree-equivalence check passes and fresh marks are seeded. |
-| Trees differ only due to historical block-list changes | `workflow_dispatch` → `seed_from_public_sha=<public-HEAD>` + `seed_blocked_paths=<historical-list>`. See [Historical block-list mismatch](#historical-block-list-mismatch). |
+| Private-owned content differs | Reconcile it through a reviewed private or public PR until the include-set trees are equivalent, then dispatch with `seed_from_public_sha=<public-HEAD>` and the matching `seed_from_private_sha`; use `dry_run=true` first. |
+| Public has a legitimate change not yet in private | Bring it to private via PR first, merge, then seed from the reviewed equivalent SHAs with `dry_run=true` first. |
+| Trees differ only due to historical block-list changes | Dispatch with `seed_from_public_sha=<public-HEAD>` + `seed_from_private_sha=<matching-private-SHA>` + `seed_blocked_paths=<historical-list>` and `dry_run=true`. See [Historical block-list mismatch](#historical-block-list-mismatch). |
 
 For the full step-by-step, see the [Sync Recovery Runbook](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md).
 
 For the full end-to-end recovery playbook (orphan-wipe, marks-cache reseed, blocked-validation backlogs, post-recovery verification), see the [Sync Recovery Runbook](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md) in `foundry-devx-eng-docs`. That runbook was authored after the 2026-06-09 → 2026-06-10 sync saga (PRs [microsoft-foundry/foundry-samples-pr#493](https://github.com/microsoft-foundry/foundry-samples-pr/pull/493), [#499](https://github.com/microsoft-foundry/foundry-samples-pr/pull/499), [#513](https://github.com/microsoft-foundry/foundry-samples-pr/pull/513), [#518](https://github.com/microsoft-foundry/foundry-samples-pr/pull/518)) and is the canonical step-by-step for incident response.
 
-### Need to rollback a sync
+### Need to revert a sync
 
 1. Find the rollback SHA from the sync PR description.
-2. Force-push that SHA to `main` on the public repo.
-3. Clear the sync marks cache (delete from GitHub Actions cache).
+2. Revert the affected public commits through a reviewed public PR; do not push directly to `main`.
+3. Reconcile the corresponding private-owned content, then seed from reviewed equivalent public/private SHAs with `dry_run=true` before the real recovery run.
 
 Rollback affects public content. It does not rewrite private validation statuses; fix or re-run validation separately if the rollback is related to gate behavior.
 
@@ -680,6 +678,7 @@ Rollback affects public content. It does not rewrite private validation statuses
 
 | Date | Change |
 |------|--------|
+| 2026-08-25 | **Removed destructive routine sync modes (ADO 5551175).** Private→public sync is manual-only and incremental after first bootstrap. Removed force-full/direct-main publication and orphan full-export recovery; established-public marks failures now require verified seed recovery. The public sync App must be removed from the `main` ruleset bypass list by a repository admin. |
 | 2026-08-05 | **Retired protection for the legacy public PR redirect workflow ([ADO 5499173](https://msdata.visualstudio.com/Vienna/_workitems/edit/5499173)).** Removed `.github/workflows/redirect-pull-requests.yml` from `protected_paths` after public-first validation made public PRs the required merge gate. The public workflow remains in place until this config change merges; deleting it first would fail the next private-to-public sync. |
 | 2026-06-29 | **mirror-back: skip on author identity only, not committer (ADO 5398977, PR #620).** `should_skip_commit` previously checked all four git identity fields (author name, author email, committer name, committer email) against the sync-bot identities. Human PRs merged to public via "direct rebase merge as the App" have a human author but sync-bot committer; this caused them to be silently dropped, producing public drift that broke sync marks on the next run. Fix: check author only. The sync pipeline always sets `GIT_AUTHOR_NAME` to the bot identity, so real sync commits still skip correctly. Regression test `test_human_author_bot_committer_not_skipped` (MB4) added to `.github/tests/test-mirror-back.sh`. Troubleshooting section updated with marks-drift recovery recipe. |
 | 2026-06-11 | **Cross-link added to sync-recovery runbook.** Troubleshooting section and Related Documents now link to [`foundry-devx-eng-docs/operations/sync-recovery-runbook.md`](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md) — the canonical end-to-end playbook authored after the 2026-06-09 → 2026-06-10 sync saga. No mechanism changes in this entry. |

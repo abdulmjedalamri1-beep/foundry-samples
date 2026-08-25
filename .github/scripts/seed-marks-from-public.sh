@@ -137,7 +137,7 @@ build_dynamic_pathspecs() {
         log "WARNING: seed_blocked_paths is bypassing the tree-equivalence check for $count path(s): ${SYNC_BLOCKED_PATHS}"
         log "WARNING: Only use seed_blocked_paths for historically-excluded paths that were never synced."
         log "WARNING: Using it to silence a real content divergence will corrupt the marks cache."
-        log "WARNING: If tree-equivalence fails for content you care about, use force_full=true instead."
+        log "WARNING: If tree-equivalence fails for content you care about, stop and reconcile the trees through reviewed changes."
     fi
 }
 

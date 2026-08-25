@@ -203,7 +203,7 @@ It does **not** define:
 
 - [Validation Story — Phase B Decisions](validation-story-decisions.md) — Locked decisions that supersede earlier validation/sync-gating text.
 - [Validation Results Contract](validation-results-contract.md) — Pipeline registry, status posting convention, credentials, retry semantics, and tracking-set definitions.
-- [Repo Sync Automation](repo-sync-automation.md) — How the nightly sync from private to public works.
+- [Repo Sync Automation](repo-sync-automation.md) — How the manually dispatched sync from private to public works.
 - [External Contributions](external-contributions.md) — Partner contribution model and SLAs.
 - [Pipeline README](../.azure-pipelines/README.md) — Operational details of the ADO validation pipeline.
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — Contributor guide with validation quick-reference.

@@ -3,6 +3,8 @@
 This document records the **one-time** authorship-preservation cutover performed on 2026-04-29 against the public `foundry-samples` repository. It is preserved as a runbook so that a future similar surgery (a sync-pipeline replacement, an authorship rewrite, a public-repo history reset) has a known-good template.
 
 > If you are a regular contributor and have arrived here looking for "how does sync work day to day," you want [Repo Sync Automation](repo-sync-automation.md). This document is for one-off pipeline surgery.
+>
+> **Historical procedure only:** the current sync workflow does not expose full-tree export, direct-public-main push, or force-push recovery. Do not use the steps below for a routine incident. Reconcile through reviewed PRs and use verified seed recovery with `dry_run=true` as documented in [Repo Sync Automation](repo-sync-automation.md).
 
 ## What changed
 
@@ -90,15 +92,17 @@ The branch ruleset on public `main` blocks force-push even for bypass actors whe
 
 A ruleset *disable* is recoverable and audited; deleting and recreating the ruleset is not. Use disable.
 
-### 3. Rebuild and force-push
+### 3. Rebuild and force-push (historical cutover only)
 
-Run the new sync pipeline in **non-incremental** mode (`force_full=true`) targeting public `main` directly. The pipeline will:
+At the 2026-04-29 cutover, a temporary non-incremental pipeline targeted public `main` directly. That retired pipeline:
 
 1. Stream all of private `main` through `filter-stream.py` with `.github/sync-mailmap` applied.
 2. Fast-import into a fresh ref on the public side.
 3. Force-push that ref to `refs/heads/main`.
 
 Confirm the resulting `main` head SHA matches the dry-run prediction before proceeding.
+
+The current `sync-to-public.yml` cannot perform this operation. Any future history surgery requires a separately reviewed, time-bounded admin plan; it must not be added back as a routine workflow input or recovery path.
 
 ### 4. Re-enable the ruleset
 
@@ -129,9 +133,9 @@ gh pr create --base main
 
 Do **not** skip this step. The 2026-04-29 cutover did skip it (the runbook didn't yet contain it) and the public repo lost its README, CONTRIBUTING, and several public-only workflows including PR redirect and PR checks. The omission was caught only when a contributor noticed the README missing days later — see [foundry-samples PR #676](https://github.com/microsoft-foundry/foundry-samples/pull/676).
 
-### 6. Re-enable the schedule
+### 6. Re-enable the schedule (historical)
 
-Re-enable the nightly sync workflow. Confirm the next scheduled run completes as a no-op (no new private commits since cutover) or as a small delta (only commits since cutover).
+At cutover time, the nightly workflow was re-enabled and its next run was checked. The current private→public workflow is manual-only.
 
 ## Rollback
 

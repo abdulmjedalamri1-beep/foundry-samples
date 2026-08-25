@@ -85,9 +85,9 @@ file should contain. Look for lines like:
 
 | Diff shows | Likely cause | Recovery |
 |-----------|-------------|----------|
-| Public has a blob private doesn't (`+` lines only) | Mirror-back dropped a commit | Bring change to private via PR, then seed or `force_full` |
-| Private has a blob public doesn't (`-` lines only), or phantom blob exists in neither repo | Bad manual seed (corrupt marks) | `force_full` — do NOT seed again |
-| Both directions | Mixed/complex drift | `force_full` |
+| Public has a blob private doesn't (`+` lines only) | Mirror-back dropped a commit | Bring the change to private via PR, then seed equivalent reviewed SHAs |
+| Private has a blob public doesn't (`-` lines only), or phantom blob exists in neither repo | Bad manual seed (corrupt marks) | Reconcile through reviewed PRs, then seed equivalent reviewed SHAs |
+| Both directions | Mixed/complex drift | Reconcile each private-owned difference through reviewed PRs, then seed equivalent reviewed SHAs |
 
 ### Confirm mirror-back dropped the commit
 
@@ -104,41 +104,33 @@ file should contain. Look for lines like:
 
 ### Recovery decision table
 
-> **Default to `force_full`.** It is always safe when private is authoritative. Use
-> `seed_from_public_sha` only when you have a specific reason to preserve public
-> commit history (e.g. a legitimate change landed on public that isn't in private yet).
+> The workflow has no full-tree replacement or direct-public-main recovery mode.
+> Reconcile content through reviewed PRs, then use verified seed recovery. Always run
+> recovery with `dry_run=true` first.
 
 | Scenario | Recovery action |
 |----------|----------------|
-| Private is correct, public regressed | `workflow_dispatch` → `force_full: true` ← **preferred** |
-| Public has a legitimate change not yet in private | Bring to private via PR → merge → `seed_from_public_sha=<public-HEAD>` |
-| Trees differ only due to historical block-list | `seed_from_public_sha=<public-HEAD>` + `seed_blocked_paths=<list>` — **read warning below** |
-
-**`force_full` details:** Discards the marks cache entirely and does a full re-export
-from private. Overwrites public with private's view. Safe when private is authoritative
-and public regressed. Triggered via:
-```bash
-gh workflow run sync-to-public.yml \
-  --repo microsoft-foundry/foundry-samples-pr \
-  --field force_full=true
-```
+| Private-owned content differs | Reconcile through a reviewed PR, then seed matching public/private SHAs |
+| Public has a legitimate change not yet in private | Bring to private via PR → merge → seed matching public/private SHAs |
+| Trees differ only due to historical block-list | Seed matching SHAs with `seed_blocked_paths=<list>` — **read warning below** |
 
 **`seed_from_public_sha` details:** Re-synthesizes marks from a known-good public SHA
 by requiring the trees to be equivalent (or equivalent modulo `seed_blocked_paths`).
-Use when you first fix the drift in private, then want to re-anchor without losing history.
+Supply `seed_from_private_sha` when the equivalent private commit is older than private
+HEAD. Use `dry_run=true` first; proceed only after the tree-equivalence check passes.
 
 > ⚠️ **`seed_blocked_paths` warning:** Only supply this when the tree mismatch is in
 > paths that were **historically excluded from sync** (e.g. a sample that was block-listed
 > during a prior period and never appeared on public). Do **not** use it to silence a
 > mismatch caused by real content divergence — that will corrupt the marks cache and
-> cause phantom-blob failures on subsequent syncs. If you're unsure whether the mismatch
-> is historical or real, use `force_full` instead. The seed script logs a warning
+> cause phantom-blob failures on subsequent syncs. The seed script logs a warning
 > whenever `seed_blocked_paths` is in use; check the run log to confirm the bypassed
-> paths are what you expect.
+> paths are what you expect. If you are unsure whether the mismatch is historical or
+> real, stop and reconcile it; do not expand `seed_blocked_paths`.
 >
 > If `seed_from_public_sha` fails with "Tree mismatch" and you did **not** expect any
-> historically-blocked paths, **stop and use `force_full`** — do not add `seed_blocked_paths`
-> to make the seed pass.
+> historically-blocked paths, **stop** — do not add `seed_blocked_paths` to make the
+> seed pass. Reconcile the reviewed content until the normal equivalence check succeeds.
 
 ---
 
@@ -207,8 +199,8 @@ email addresses to the public repo.
 
 ### Recovery
 
-> ⚠️ **Do NOT use `seed_from_public_sha` or `force_full` for this failure type.**
-> Those are marks-recovery operations. Using them here is unnecessary and can introduce
+> ⚠️ **Do NOT use `seed_from_public_sha` for this failure type.**
+> That is a marks-recovery operation. Using it here is unnecessary and can introduce
 > marks corruption (see §3 recovery decision table). The marks are fine — just the
 > email is missing.
 
@@ -277,7 +269,7 @@ After PR #665 merged, this failure type should not recur:
   which correctly sets `has_imports=0`.
 
 If it somehow recurs:
-- **Do NOT use `force_full` or `seed_from_public_sha`** — the marks are fine.
+- **Do NOT use `seed_from_public_sha`** — the marks are fine.
 - The next run with real (non-excluded) commits will succeed normally.
 - If urgent: manually trigger a re-run; if the same excluded-only commits are HEAD,
   the fixed code will exit cleanly with `has_changes=false`.

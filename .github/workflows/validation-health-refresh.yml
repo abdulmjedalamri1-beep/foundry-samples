@@ -11,7 +11,7 @@ name: Validation Health Refresh
 
 on:
   schedule:
-    - cron: '30 6 * * *'   # 06:30 UTC, ~30 min after the nightly sync runs.
+    - cron: '30 6 * * *'   # Independent daily health snapshot; does not trigger sync.
   workflow_dispatch: {}
 
 permissions:

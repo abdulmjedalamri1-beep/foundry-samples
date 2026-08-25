@@ -15,7 +15,6 @@
 #
 # Optional environment variables:
 #   DRY_RUN=1            — perform full pipeline but don't push or create PR
-#   FORCE_FULL=1         — discard marks and force a full re-export
 #   SYNC_BLOCKED_PATHS   — colon-separated repo-relative paths to exclude for this run
 #
 # Exit codes:
@@ -52,9 +51,8 @@
 # immediately. See T28 in .github/tests/test-sync.sh for the regression test.
 #
 # Stale marks can also break fast-import when PUBLIC_MARKS references an
-# object that no longer exists in the public repo. Because private/export marks
-# and public/import marks are paired, import-side recovery discards both files
-# and retries the full export → filter → import pipeline from scratch.
+# object that no longer exists in the public repo. Recovery re-pairs the marks
+# against a verified public/private SHA pair; it never publishes an orphan tree.
 
 set -euo pipefail
 
@@ -119,6 +117,20 @@ fail_closed() {
     emit_output "sync_error" "$code"
     emit_output "has_changes" "false"
     exit 1
+}
+
+public_main_exists() {
+    git -C "$PUBLIC_REPO" rev-parse --verify refs/heads/main >/dev/null 2>&1 \
+        || git -C "$PUBLIC_REPO" rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1
+}
+
+require_seed_recovery() {
+    local reason="$1"
+    log "ERROR: $reason"
+    log "Public main already exists, so an unanchored full export is disabled."
+    log "Run workflow_dispatch with seed_from_public_sha and, when needed, seed_from_private_sha."
+    log "Use dry_run=true first; investigate any tree-equivalence failure instead of bypassing it."
+    fail_closed "SEED_RECOVERY_REQUIRED"
 }
 
 # Read JSON value from config using python (jq may not be available everywhere)
@@ -321,11 +333,9 @@ guard_protected_paths() {
     # land would delete or modify a protected path, regardless of how the
     # sync-branch and public-main trees diverge mid-flight.
     #
-    # GitHub merges sync PRs via `gh pr merge --rebase` (with `--squash`
-    # fallback). For the common-ancestor case (handled by the `if` branch
-    # below), both strategies land the same set of blobs on main from
-    # `merge-tree`'s perspective; the 3-way simulation is sound for either
-    # path.
+    # GitHub merges sync PRs via `gh pr merge --rebase`. For the
+    # common-ancestor case (handled by the `if` branch below), the 3-way
+    # simulation computes the tree that the rebase merge will land.
     #
     # For an orphan sync branch (no common ancestor — handled by the
     # `else` branch below), `merge-tree` cannot soundly simulate either
@@ -333,8 +343,8 @@ guard_protected_paths() {
     # omit (it would produce a UNION tree and silently false-pass orphan
     # wipes — see the inline comment in the `else` branch). The orphan path
     # therefore treats the sync-branch tip tree as the prospective merge
-    # result directly — that direct-tree check is what catches squash-of-
-    # orphan wipes (ADO 5349966), NOT the merge-tree simulation.
+    # result directly — that direct-tree check is what catches orphan wipes
+    # (ADO 5349966), NOT the merge-tree simulation.
     #
     # `git merge-tree --write-tree` (git >= 2.38) computes the merged tree
     # OID without touching refs or the working tree — safe for dry-run.
@@ -364,26 +374,6 @@ guard_protected_paths() {
     # and silently false-pass orphan wipes.
     local result_tree merge_output
 
-    # When FORCE_FULL is active, skip the merge-tree simulation entirely.
-    # force_full means "private is the canonical source of truth — discard
-    # history and produce a fresh tree." The merge-tree check guards against
-    # *accidental* wipes during incremental syncs, but force_full is an
-    # intentional override. We still validate each protected path individually
-    # below (orphan semantics), so protected files won't be silently wiped.
-    # Without this, stale rename-tracking artifacts on public (e.g. from
-    # manual restore PRs) cause spurious rename/delete conflicts that block
-    # the force-full recovery path indefinitely.
-    #
-    # Additionally, force_full sync branches are orphans that naturally lack
-    # .github/ content (excluded from export). The direct-push step in the
-    # workflow handles preserving protected files by augmenting the tree.
-    # Skip the guard entirely so it doesn't block on expected missing paths.
-    if [[ "${FORCE_FULL:-0}" == "1" ]]; then
-        log "Protected-paths guard: FORCE_FULL=1 — skipping entirely (direct-push step preserves protected files)"
-        return 0
-    fi
-
-    local result_tree merge_output
     if git -C "$PUBLIC_REPO" merge-base "$base_ref" "$head_ref" >/dev/null 2>&1; then
         # Capture inside `if !` so `set -e` doesn't terminate the script on
         # non-zero exit before our distinct conflict-error path runs.
@@ -464,7 +454,9 @@ guard_protected_paths() {
         log "     'seed_from_public_sha' input set to the current public main"
         log "     HEAD. seed-marks-from-public.sh will validate tree-equivalence"
         log "     over the include-set and re-pair the marks."
-        log "  3. The next scheduled sync will resume with re-anchored marks."
+        log "     Supply seed_from_private_sha when the matching private state is"
+        log "     older than HEAD, and use dry_run=true first."
+        log "  3. The next manual sync will resume with re-anchored marks."
         log ""
         log "See docs/repo-sync-automation.md for the full recovery procedure."
         return 1
@@ -529,11 +521,11 @@ read_last_synced_sentinel() {
     fi
 }
 
-# Three-way state check:
-#   - No stored hash + no marks → first run → full export, no warning
-#   - Stored hash matches current → incremental, use marks
-#   - Stored hash differs → static config changed → discard marks, full re-export, warn
-# Also discards marks if root commit SHA changed (force-push or repo recreated).
+# State check:
+#   - No public main → first-ever bootstrap may perform a full export.
+#   - Public main exists → complete, matching marks are required.
+#   - Missing, inconsistent, or invalid state fails closed and requires a
+#     tree-equivalent seed; established repositories never rebuild an orphan.
 # Note: only static `exclude_pathspecs` participate in the hash. The per-run
 # validation block-list (SYNC_BLOCKED_PATHS) does not invalidate marks; its
 # effect is applied at filter-stream time via build_filter_exclude_paths.
@@ -555,7 +547,10 @@ check_marks_validity() {
     fi
 
     if [[ $has_marks -eq 0 && $has_state -eq 0 ]]; then
-        log "First run detected — full export"
+        if public_main_exists; then
+            require_seed_recovery "Marks cache is missing."
+        fi
+        log "First-ever bootstrap detected — public main is absent; full export allowed"
         echo "$current_hash" > "$HASH_FILE"
         echo "$current_root" > "$ROOT_FILE"
         rm -f "$LAST_SYNCED_FILE"
@@ -563,7 +558,10 @@ check_marks_validity() {
     fi
 
     if [[ $has_marks -eq 0 || $has_state -eq 0 ]]; then
-        log "WARNING: Inconsistent state — marks or hash missing. Forcing full re-export."
+        if public_main_exists; then
+            require_seed_recovery "Marks cache is incomplete."
+        fi
+        log "WARNING: Incomplete bootstrap state with no public main — rebuilding state."
         rm -f "$PRIVATE_MARKS" "$PUBLIC_MARKS" "$LAST_SYNCED_FILE"
         echo "$current_hash" > "$HASH_FILE"
         echo "$current_root" > "$ROOT_FILE"
@@ -571,7 +569,10 @@ check_marks_validity() {
     fi
 
     if [[ "$stored_root" != "$current_root" ]]; then
-        log "WARNING: Root commit changed ($stored_root → $current_root). Forcing full re-export."
+        if public_main_exists; then
+            require_seed_recovery "Private root commit changed ($stored_root → $current_root)."
+        fi
+        log "WARNING: Private root changed before first public bootstrap — rebuilding state."
         rm -f "$PRIVATE_MARKS" "$PUBLIC_MARKS" "$LAST_SYNCED_FILE"
         echo "$current_hash" > "$HASH_FILE"
         echo "$current_root" > "$ROOT_FILE"
@@ -579,15 +580,12 @@ check_marks_validity() {
     fi
 
     if [[ "$stored_hash" != "$current_hash" ]]; then
-        log "WARNING: Pathspec config changed. Forcing full re-export."
+        if public_main_exists; then
+            require_seed_recovery "Static path exclusions changed."
+        fi
+        log "WARNING: Path exclusions changed before first public bootstrap — rebuilding state."
         rm -f "$PRIVATE_MARKS" "$PUBLIC_MARKS" "$LAST_SYNCED_FILE"
         echo "$current_hash" > "$HASH_FILE"
-        return 0
-    fi
-
-    if [[ "${FORCE_FULL:-0}" == "1" ]]; then
-        log "FORCE_FULL=1 — discarding marks, full re-export"
-        rm -f "$PRIVATE_MARKS" "$PUBLIC_MARKS" "$LAST_SYNCED_FILE"
         return 0
     fi
 
@@ -647,22 +645,12 @@ run_fast_export() {
         --no-renames \
         > "$stream_file" 2>"$stream_file.err"; then
 
-        # Stale marks recovery: if export failed and we had marks, retry without them
-        if [[ ${#import_marks_arg[@]} -gt 0 ]]; then
-            log "WARNING: fast-export failed with marks — retrying without (stale marks recovery)"
-            cat "$stream_file.err" >&2
-            rm -f "$PRIVATE_MARKS" "$PUBLIC_MARKS"
-            git -C "$PRIVATE_REPO" fast-export \
-                --export-marks="$PRIVATE_MARKS" \
-                --refspec="$export_ref:refs/heads/main" \
-                "$export_ref" \
-                --tag-of-filtered-object=drop \
-                --no-renames \
-                > "$stream_file" 2>"$stream_file.err"
-        else
-            cat "$stream_file.err" >&2
-            return 1
+        cat "$stream_file.err" >&2
+        if [[ ${#import_marks_arg[@]} -gt 0 ]] && public_main_exists; then
+            log "ERROR: fast-export failed with marks; refusing to retry as an unanchored full export."
+            log "Seed recovery is required before retrying."
         fi
+        return 1
     fi
 
     local size
@@ -958,6 +946,11 @@ apply_public_overlay() {
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 main() {
+    if [[ -n "${FORCE_FULL:-}" && "${FORCE_FULL}" != "0" ]]; then
+        log "ERROR: FORCE_FULL is disabled; direct or full-tree replacement sync is not supported."
+        fail_closed "FORCE_FULL_DISABLED"
+    fi
+
     require_env
     setup_marks_state
     check_marks_validity
@@ -1000,7 +993,9 @@ main() {
     last_synced_private_sha=$(read_last_synced_sentinel)
 
     # Step 1: Export from private
-    run_fast_export "$export_stream"
+    if ! run_fast_export "$export_stream"; then
+        fail_closed "EXPORT_FAILED"
+    fi
 
     # Step 2: Filter the stream (rewrite refs/heads/main -> refs/heads/$SYNC_BRANCH safely)
     run_filter "$export_stream" "$filtered_stream" \
@@ -1047,12 +1042,8 @@ main() {
         # this re-pairs the marks against the rebased SHAs and the retry
         # imports as a single delta on top of public main HEAD.
         #
-        # Only fall back to the legacy discard-and-full-reexport path when seed
-        # is not applicable (no public main yet, or no PRIVATE_MARKS tail to
-        # pair against). Tree-mismatch during seed indicates real drift on
-        # public main; we let seed's hard-fail surface and bail rather than
-        # silently producing an orphan branch (PR #699 was the canonical bad
-        # outcome of the old fall-through).
+        # Tree-mismatch during seed indicates real drift on public main. Fail
+        # closed rather than producing an orphan branch.
         local public_main_sha="" seed_recovered=0
         if git -C "$PUBLIC_REPO" rev-parse --verify refs/heads/main >/dev/null 2>&1; then
             public_main_sha=$(git -C "$PUBLIC_REPO" rev-parse refs/heads/main)
@@ -1069,7 +1060,9 @@ main() {
                    --public-sha "$public_main_sha" \
                    --marks-dir "$MARKS_DIR" 2>"$seed_err"; then
                 log "Seed-marks recovery succeeded — retrying export+import with re-paired marks"
-                run_fast_export "$export_stream"
+                if ! run_fast_export "$export_stream"; then
+                    fail_closed "EXPORT_FAILED"
+                fi
                 run_filter "$export_stream" "$filtered_stream" \
                     "refs/heads/main" "refs/heads/$SYNC_BRANCH"
                 import_result=0
@@ -1085,9 +1078,14 @@ main() {
         fi
 
         if [[ $seed_recovered -eq 0 ]]; then
-            log "WARNING: fast-import failed with marks — discarding paired marks and retrying full export+import (stale marks recovery, no seed inputs available)"
-            rm -f "$PRIVATE_MARKS" "$PUBLIC_MARKS"
-            run_fast_export "$export_stream"
+            if public_main_exists; then
+                require_seed_recovery "Fast-import marks are stale and no verified seed anchor is available."
+            fi
+            log "WARNING: stale bootstrap marks with no public main — rebuilding first-public state."
+            rm -f "$PRIVATE_MARKS" "$PUBLIC_MARKS" "$LAST_SYNCED_FILE"
+            if ! run_fast_export "$export_stream"; then
+                fail_closed "EXPORT_FAILED"
+            fi
             run_filter "$export_stream" "$filtered_stream" \
                 "refs/heads/main" "refs/heads/$SYNC_BRANCH"
             import_result=0
@@ -1174,7 +1172,7 @@ main() {
 
     write_last_synced_sentinel "$current_source_sha"
     log "Sync complete. Branch $SYNC_BRANCH ready in $PUBLIC_REPO"
-    log "Caller is responsible for: git push, gh pr create, gh pr merge --auto"
+    log "Caller is responsible for: git push, gh pr create, wait for checks, and merge"
     exit 0
 }
 

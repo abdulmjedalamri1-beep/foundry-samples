@@ -66,7 +66,7 @@ Originally locked as "piggyback on `sync-to-public.yml` + daily cron." Revised 2
 
 Final mechanism:
 
-- A dedicated cron workflow at `30 6 * * *` UTC (30 minutes after the nightly sync) is the **only** writer of the Health Board file.
+- A dedicated cron workflow at `30 6 * * *` UTC is the **only** writer of the Health Board file. It originally ran 30 minutes after the nightly sync; with private→public sync now manual-only, the health refresh remains an independent daily snapshot.
 - `workflow_dispatch` for manual refresh.
 - No `push:main` trigger, no piggyback in `sync-to-public.yml`.
 - Trade-off accepted: max staleness ~24h. If sync-time visibility becomes desirable later, the fallback step-summary form factor (Q2) can be turned on inside `sync-to-public.yml` as a read-only side effect (no git mutations), keeping the gate untouched.
