@@ -88,6 +88,7 @@ permissions:
 
 env:
   AZURE_LOCATION: northcentralus
+  AZURE_DEV_COLLECT_TELEMETRY: "no"
 
 jobs:
   # ── Discover all samples ──────────────────────────────────────────

@@ -36,6 +36,7 @@ permissions:
 
 env:
   AZURE_LOCATION: northcentralus
+  AZURE_DEV_COLLECT_TELEMETRY: "no"
 
 jobs:
   cloud-e2e:
