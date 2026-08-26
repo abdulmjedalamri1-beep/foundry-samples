@@ -1,19 +1,15 @@
-## Temporary public contribution cutover notice (through August 25, 2026)
+## Repository purpose and publication routing
 
-Until this temporary guidance is replaced at activation time:
+- This private repository is internal-first and remains available for internal work.
+- Work intended for publication belongs by default in a normal pull request in [`microsoft-foundry/foundry-samples`](https://github.com/microsoft-foundry/foundry-samples).
+- Merging a change in this private repository does not automatically publish it.
+- An operator-only retained bridge exists for authorized maintainers handling approved internal content. It is not a contributor publication route.
+- Agents must not dispatch the retained bridge or initiate verified seed recovery without explicit authorization from an operator for that action.
+- If private work should be published without an authorized bridge operation, its owner must manually recreate or port it into a public pull request.
+- If a contributor lacks public branch access, surface that blocker and direct them to Brandon Miller or the Foundry DevX team. Do not invent an alternate publication route.
+- Do not add pre-cutover notices to pull-request bodies.
 
-- On the first substantive turn in a session involving private-repository work that may be intended for publication, proactively tell the driving human once that beginning August 25, published Foundry sample contributions move to `microsoft-foundry/foundry-samples`; until then, they should continue the current contribution process.
-- Surface that contributor-facing message only once per session. Do not repeat it on later turns.
-- When you create or materially update a private PR intended for publication, add the exact Markdown notice below to the PR body if the marker `<!-- p5-public-cutover-notice -->` is absent.
-- Prefer updating the PR body over posting a separate PR comment. Do not add a standalone comment when the body can be updated.
-- Never add the notice to bot PRs, internal-only work, or PRs that already carry the marker.
-- Treat this as best-effort contributor signaling only. It does not authorize early routing changes, merges, sync triggers, or settings changes.
-
-Add this exact Markdown to qualifying PR bodies (without a surrounding code fence):
-
-**Upcoming contribution change:** Beginning August 25, published Foundry sample contributions will move to [`microsoft-foundry/foundry-samples`](https://github.com/microsoft-foundry/foundry-samples) so sample work has one clear, shared home. Until then, continue using the current contribution process. We'll confirm any next step for this work before cutover.
-
-<!-- p5-public-cutover-notice -->
+Do not tell contributors that editing this private repository, `public-overlay/`, sync configuration, or publication machinery will publish changes. Do not invent or propose private merge policies, staging taxonomies, classifiers, manifests, staging roots, promotion commands or environments, formal handoff or immutable-SHA protocols, exception sync, reverse mirrors, replay, `force_full`, marks repair, unverified reseeding, or other retired destructive publication and recovery mechanisms.
 
 ## Files owned by the AI Platform Docs team
 
@@ -30,41 +26,15 @@ Only files owned by the AI Platform Docs team are subject to these rules.
 
 ## Repository governance
 
-This repo has detailed governance documentation in `docs/`:
+Use the following documents for enduring validation and sample-quality guidance:
 
 - `docs/validation-story-decisions.md` — Locked validation direction. For validation-related work, this wins if docs appear to disagree.
-- `docs/validation-contract.md` — Validation behavior, `sample.yaml` contract, build readiness levels, and sync-gating semantics.
-- `docs/validation-results-contract.md` — How ADO, GitHub Actions, and external pipelines post per-sample GitHub commit statuses that participate in sync gating.
-- `docs/validation-reporting-decisions.md` — Decisions on how `validation-health-refresh.yml` and related reporters keep `main`-HEAD statuses current.
-- `docs/repo-sync-automation.md` — How private-to-public sync works, including static exclusions, dynamic validation exclusions, fast-export/import, author rewriting, and PR automation.
-- `docs/sync-cutover-runbook.md` — One-time pipeline-replacement / authorship-rewrite surgery procedure. For ordinary sync-incident recovery (orphan-wipe, marks reseed, guard failures), see the [Sync Recovery Runbook](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md) in `foundry-devx-eng-docs`.
-- `docs/external-contributions.md` — Partner contribution model, validation paths, 4 business day SLA, and escalation path.
+- `docs/validation-contract.md` — Validation behavior, the `sample.yaml` contract, and build readiness levels.
 
-When answering questions about validation, sync behavior, or the contribution process, reference these docs rather than guessing.
-
-## Validation and sync direction
-
-Validation gates public sync. The sync gate is a per-sample block-list driven by GitHub commit statuses on the private `main` commit being synced. Status contexts use `validation/<pipeline-id>/<sample-path>`; `failure`, `error`, or `pending` blocks that sample, while `success` does not. Samples with no reporting pipeline are untracked/grandfathered and sync ungated in v1.
+Legacy sync documentation, workflows, configuration, `public-overlay/`, and recovery runbooks may remain in the repository as historical or incident evidence; do not use them as contributor publication guidance. The retained bridge and its current operator runbook are not retired, but agents may operate the bridge or initiate verified seed recovery only with explicit operator authorization.
 
 ## Sample structure
 
-Samples generally live under `samples/<language>/<area>/<feature>/`. Add `sample.yaml` when using the central ADO validation pipeline; it discovers directories under `samples/` that contain `sample.yaml` and validates them to Level 3 (Load). External/team-owned pipelines may track samples through their own manifests and must report statuses per `docs/validation-results-contract.md`.
+Samples generally live under `samples/<language>/<area>/<feature>/`. Add `sample.yaml` when using the central ADO validation pipeline; it discovers directories under `samples/` that contain `sample.yaml` and validates them to Level 3 (Load). Continue to follow applicable internal validation checks and team-owned quality requirements.
 
 For every new Python or C# hosted-agent sample, read and follow [`internal/tools/samples-hosted-agents/README.md`](../internal/tools/samples-hosted-agents/README.md). A new hosted-agent sample must register a responsible Microsoft owner and add deterministic turns/assertions in `test-spec.yml`; legacy payloads and generated defaults are migration-only.
-
-## Sync exclusions
-
-The exclusion list lives in `.github/sync-config.json` under `exclude_pathspecs`; consult it for the authoritative set of internal-only paths excluded from sync to public. Do not put temporary validation holds in that file; the sync gate creates dynamic per-run exclusions for blocked samples.
-
-## Public-overlay and protected paths
-
-Two additional sync mechanisms live in `.github/sync-config.json` alongside `exclude_pathspecs`:
-
-- **`public-overlay/`** — Content under this directory ships to the public repo on every sync via `apply_public_overlay`. Use it for files that should exist on public but should not be authored in the synced tree (e.g., public-only `README.md`, `CONTRIBUTING.md`, mirror-back workflow source). The directory itself is *excluded* from the normal sync stream and re-applied as an overlay, so editing a file under `public-overlay/` is how you change the corresponding file on public main. **Public workflow files do NOT belong here** — see `docs/repo-sync-automation.md` § "Public→private mirror-back" for context.
-- **`protected_paths`** — A guard list of paths that exist on public main but are *not* in private's include-set or `public-overlay/`. `sync-core.sh` simulates the prospective rebase-merge tree and hard-fails the sync if any listed path would be deleted or modified. Today's list covers `mirror-back.yml` and `run-setup.yml`. See `docs/repo-sync-automation.md` § "Protected-paths guard" for the mechanism and recovery procedure.
-
-When a sync incident touches either mechanism, the canonical recovery playbook is the [Sync Recovery Runbook](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md) in `foundry-devx-eng-docs`.
-
-## Sync incident response
-
-When a user pastes a failing `sync-to-public` run URL (e.g., `https://github.com/microsoft-foundry/foundry-samples-pr/actions/runs/<id>`) or says a sync run has failed, **read `.github/skills/sync-incident-response.md` before taking any other action.** That file is the authoritative diagnostic and recovery playbook: how to get logs, identify the failure type, confirm root cause, and choose the right recovery option. Do not guess or improvise — follow the playbook.
