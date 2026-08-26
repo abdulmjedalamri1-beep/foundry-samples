@@ -2,8 +2,7 @@
 # .github/scripts/sync-core.sh
 #
 # Orchestrator for foundry-samples-pr → foundry-samples sync.
-# Performs: marks management → fast-export → filter → fast-import →
-# CODEOWNERS handling → ref update → optional push.
+# Performs: marks management → fast-export → filter → fast-import → scope guard.
 #
 # Required environment variables:
 #   PRIVATE_REPO   — path to checked-out private repo (must have full history)
@@ -16,6 +15,7 @@
 # Optional environment variables:
 #   DRY_RUN=1            — perform full pipeline but don't push or create PR
 #   SYNC_BLOCKED_PATHS   — colon-separated repo-relative paths to exclude for this run
+#   SYNC_ADDITIONAL_PATHS — colon-separated exact files or trailing-slash directories
 #
 # Exit codes:
 #   0 — success (sync completed, ref updated)
@@ -37,18 +37,12 @@
 #   - fast-import creates the original branch name in the public repo's
 #     local clone (e.g. refs/heads/<feature-branch>), never pushed.
 #   - refs/heads/$SYNC_BRANCH is never created by fast-import.
-#   - apply_codeowners falls into the "branch missing → create from main"
-#     fallback and amends public main's tip. Pushed branch is essentially
-#     public main + 1 amend commit, with no imported authorship at all.
+#   - refs/heads/$SYNC_BRANCH is missing, so the pipeline fails before push.
 #
 # Mitigation: run_fast_export pins SOURCE_REF to a fixed temp ref
 # (refs/heads/sync-export-source) in the private repo before exporting, so
 # the stream deterministically emits `commit refs/heads/main`, and our
 # refspec + filter rewrites are predictable.
-#
-# Defensive check: apply_codeowners hard-fails if has_imports==1 but
-# refs/heads/$SYNC_BRANCH is missing — would catch a regression of this bug
-# immediately. See T28 in .github/tests/test-sync.sh for the regression test.
 #
 # Stale marks can also break fast-import when PUBLIC_MARKS references an
 # object that no longer exists in the public repo. Recovery re-pairs the marks
@@ -59,6 +53,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILTER_SCRIPT="$SCRIPT_DIR/filter-stream.py"
 SEED_MARKS_SCRIPT="$SCRIPT_DIR/seed-marks-from-public.sh"
+SCOPE_ASSERT_SCRIPT="$SCRIPT_DIR/assert-sync-scope.sh"
 
 # Source ref to export from. Default works for local tests where main is a
 # local branch; CI sets this to HEAD (detached) or origin/main.
@@ -78,7 +73,7 @@ require_env() {
         exit 1
     fi
 
-    for path in "$PRIVATE_REPO" "$PUBLIC_REPO" "$CONFIG_FILE" "$MAILMAP_FILE" "$FILTER_SCRIPT"; do
+    for path in "$PRIVATE_REPO" "$PUBLIC_REPO" "$CONFIG_FILE" "$MAILMAP_FILE" "$FILTER_SCRIPT" "$SCOPE_ASSERT_SCRIPT"; do
         if [[ ! -e "$path" ]]; then
             echo "ERROR: Required path not found: $path" >&2
             exit 1
@@ -136,19 +131,22 @@ require_seed_recovery() {
 # Read JSON value from config using python (jq may not be available everywhere)
 config_get() {
     local key="$1"
-    python3 -c "
-import json, sys
-with open('$CONFIG_FILE') as f:
+    python3 - "$CONFIG_FILE" "$key" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as f:
     cfg = json.load(f)
-keys = '$key'.split('.')
+keys = sys.argv[2].split('.')
 val = cfg
 for k in keys:
     val = val[k]
 if isinstance(val, list):
-    print('\n'.join(str(x) for x in val))
+    output = '\n'.join(str(x) for x in val)
 else:
-    print(val)
-"
+    output = str(val)
+sys.stdout.buffer.write((output + '\n').encode())
+PY
 }
 
 # Normalize a repo-relative path supplied by the validation gate.
@@ -178,11 +176,10 @@ build_dynamic_pathspecs() {
         if ! normalized=$(normalize_blocked_path "$raw"); then
             continue
         fi
-        if [[ -d "$PRIVATE_REPO/$normalized" ]]; then
-            printf ':!%s/\n' "$normalized"
-        elif [[ -e "$PRIVATE_REPO/$normalized" ]]; then
-            printf ':!%s\n' "$normalized"
-        fi
+        # Validation emits sample roots. Keep the exclusion even when the path
+        # was deleted privately so reconciliation cannot delete a published
+        # blocked copy.
+        printf ':!%s/\n' "$normalized"
     done
 }
 
@@ -219,6 +216,7 @@ build_filter_exclude_paths() {
         path="${path#:(exclude)}"
         path="${path%/}"
         [[ -z "$path" ]] && continue
+        additional_overrides_exclusion "$path" && continue
         printf '%s\n' "$path"
     done < <(config_get "exclude_pathspecs")
 
@@ -230,6 +228,22 @@ build_filter_exclude_paths() {
         [[ -z "$path" ]] && continue
         printf '%s\n' "$path"
     done < <(build_dynamic_pathspecs)
+}
+
+additional_overrides_exclusion() {
+    local excluded="$1"
+    local allowed bare
+    local -a additions=()
+    [[ -z "${SYNC_ADDITIONAL_PATHS:-}" ]] && return 1
+
+    IFS=':' read -r -a additions <<< "$SYNC_ADDITIONAL_PATHS"
+    for allowed in "${additions[@]}"; do
+        bare="${allowed%/}"
+        if [[ "$bare" == "$excluded" || "$bare" == "$excluded"/* ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Emit excluded basenames (one per line) for filter-stream.py's
@@ -245,225 +259,47 @@ build_filter_exclude_paths() {
 # orphan full re-export. Already-synced marker files are therefore left in
 # place on public until removed out-of-band.
 build_filter_exclude_basenames() {
-    python3 -c "
+    python3 - "$CONFIG_FILE" <<'PY'
 import json
-with open('$CONFIG_FILE') as f:
+import sys
+
+with open(sys.argv[1]) as f:
     cfg = json.load(f)
 for b in cfg.get('exclude_basenames', []):
     b = str(b).strip()
     if b:
-        print(b)
-"
+        sys.stdout.buffer.write((b + '\n').encode())
+PY
 }
 
-# ── Protected-paths guard ─────────────────────────────────────────────────────
-#
-# Public-only files (e.g., GitHub Actions workflows) live exclusively on public
-# main and are not in the sync include-set (`.github/` is excluded). They are
-# preserved across syncs by fast-import's marks-anchored ancestry: each sync
-# branch inherits the parent tree from the previous sync's commit, which has
-# inherited public's workflows.
-#
-# When that ancestry chain breaks — most commonly when the discard-and-full-
-# reexport recovery path (line ~770) fires without seed inputs — the resulting
-# sync branch is orphaned and lacks public-only files. Pushing and merging that
-# branch wipes them from public. (Incidents: PR #705/#707; PRs #758/#763 in
-# 2026-06.)
-#
-# The guard runs after the sync branch is fully built (post-overlay,
-# post-CODEOWNERS) and before the script exits. For each path listed in
-# sync-config.json's `protected_paths`, it compares the blob SHA on fresh
-# `origin/main` against the blob SHA on the local sync branch. Any deletion or
-# content drift hard-fails the sync with a prescriptive recovery error.
-
-# Read protected_paths from CONFIG_FILE. Returns 0 lines if the key is absent.
-read_protected_paths() {
-    python3 -c "
+build_default_include_args() {
+    python3 - "$CONFIG_FILE" <<'PY'
 import json
-with open('$CONFIG_FILE') as f:
+import sys
+
+with open(sys.argv[1]) as f:
     cfg = json.load(f)
-for p in cfg.get('protected_paths', []):
-    print(p)
-"
+for p in cfg.get('default_include_paths', []):
+    p = str(p)
+    if p:
+        kind = "prefix" if p.endswith("/") else "file"
+        sys.stdout.buffer.write((kind + "\t" + p.rstrip("/") + "\n").encode())
+PY
 }
 
-guard_protected_paths() {
-    local -a protected_paths=()
-    mapfile -t protected_paths < <(read_protected_paths)
+build_additional_include_args() {
+    local raw
+    local -a paths=()
+    [[ -z "${SYNC_ADDITIONAL_PATHS:-}" ]] && return 0
 
-    if [[ ${#protected_paths[@]} -eq 0 ]]; then
-        return 0
-    fi
-
-    # Refresh public main so the comparison reflects current ground truth, not
-    # the local checkout taken at workflow start. A human PR that lands on
-    # public during the sync run shifts the base; comparing against stale local
-    # main risks a false-positive guard fire.
-    if ! git -C "$PUBLIC_REPO" fetch --quiet origin main 2>/dev/null; then
-        log "WARNING: protected-paths guard could not fetch origin/main; comparing against local main"
-    fi
-
-    local base_ref
-    if git -C "$PUBLIC_REPO" rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
-        base_ref="refs/remotes/origin/main"
-    elif git -C "$PUBLIC_REPO" rev-parse --verify refs/heads/main >/dev/null 2>&1; then
-        base_ref="refs/heads/main"
-    else
-        log "Protected-paths guard: public has no main ref — skipping (first-ever sync)"
-        return 0
-    fi
-
-    local head_ref="refs/heads/$SYNC_BRANCH"
-    if ! git -C "$PUBLIC_REPO" rev-parse --verify "$head_ref" >/dev/null 2>&1; then
-        log "ERROR: Protected-paths guard: sync branch $SYNC_BRANCH not present at guard time"
-        return 1
-    fi
-
-    # Compute the prospective post-rebase-merge tree (ADO 5347121 / 5347427).
-    # We do NOT compare blobs at the sync-branch tip directly: the sync branch
-    # is always built by importing a delta-mode fast-export stream filtered by
-    # `filter-stream.py --exclude-path` (see `run_fast_export` /
-    # `run_filter`). For excluded paths, each sync-branch commit's tree
-    # inherits content from its marks-anchored parent — but that parent's
-    # tree may differ from current public main (e.g. when a human PR has
-    # landed since the marks were last anchored, or when seed-marks-recovery
-    # repointed the marks at PUBLIC_SHA but public main has since advanced).
-    # The post-rebase-merge tree is therefore the correct ground truth:
-    # simulating the merge GitHub will perform reveals whether the eventual
-    # land would delete or modify a protected path, regardless of how the
-    # sync-branch and public-main trees diverge mid-flight.
-    #
-    # GitHub merges sync PRs via `gh pr merge --rebase`. For the
-    # common-ancestor case (handled by the `if` branch below), the 3-way
-    # simulation computes the tree that the rebase merge will land.
-    #
-    # For an orphan sync branch (no common ancestor — handled by the
-    # `else` branch below), `merge-tree` cannot soundly simulate either
-    # strategy without `--allow-unrelated-histories`, which we deliberately
-    # omit (it would produce a UNION tree and silently false-pass orphan
-    # wipes — see the inline comment in the `else` branch). The orphan path
-    # therefore treats the sync-branch tip tree as the prospective merge
-    # result directly — that direct-tree check is what catches orphan wipes
-    # (ADO 5349966), NOT the merge-tree simulation.
-    #
-    # `git merge-tree --write-tree` (git >= 2.38) computes the merged tree
-    # OID without touching refs or the working tree — safe for dry-run.
-
-    local git_version_line git_major git_minor
-    git_version_line=$(git --version)
-    git_major=$(printf '%s' "$git_version_line" | sed -E 's/^git version ([0-9]+)\.([0-9]+).*/\1/')
-    git_minor=$(printf '%s' "$git_version_line" | sed -E 's/^git version ([0-9]+)\.([0-9]+).*/\2/')
-    if ! [[ "$git_major" =~ ^[0-9]+$ ]] || ! [[ "$git_minor" =~ ^[0-9]+$ ]]; then
-        log "ERROR: Protected-paths guard: could not parse git version from '$git_version_line'"
-        return 1
-    fi
-    if (( git_major < 2 )) || { (( git_major == 2 )) && (( git_minor < 38 )); }; then
-        log "ERROR: Protected-paths guard requires git >= 2.38 (for 'merge-tree --write-tree'); found $git_version_line"
-        return 1
-    fi
-
-    # Decide the prospective merge tree. In real sync topology, sync_branch
-    # always anchors back to a previous public state via --import-marks, so
-    # the merge base exists and merge-tree gives us the post-rebase tree.
-    # For a true orphan sync branch (no common ancestor — only synthetic test
-    # fixtures hit this in practice), fall back to the head tree directly:
-    # an orphan rebase-merge would replace public main wholesale, so the head
-    # tree IS the prospective result. Note: do NOT pass
-    # `--allow-unrelated-histories` to merge-tree — with an empty merge base
-    # it produces a UNION tree that would preserve protected files from base
-    # and silently false-pass orphan wipes.
-    local result_tree merge_output
-
-    if git -C "$PUBLIC_REPO" merge-base "$base_ref" "$head_ref" >/dev/null 2>&1; then
-        # Capture inside `if !` so `set -e` doesn't terminate the script on
-        # non-zero exit before our distinct conflict-error path runs.
-        if ! merge_output=$(git -C "$PUBLIC_REPO" merge-tree --write-tree "$base_ref" "$head_ref" 2>&1); then
-            log "ERROR: Protected-paths guard: prospective merge of $head_ref into $base_ref has conflicts or 'git merge-tree' failed. This is NOT a protected-paths violation — the sync cannot proceed because the eventual rebase-merge would not apply cleanly."
-            log "merge-tree output:"
-            while IFS= read -r line; do
-                log "  $line"
-            done <<< "$merge_output"
-            return 1
-        fi
-        # On success, stdout is exactly the result-tree OID on the first line.
-        result_tree=$(printf '%s\n' "$merge_output" | head -n 1)
-    else
-        log "Protected-paths guard: no common ancestor between $base_ref and $head_ref — treating sync branch tree as the prospective merge result (orphan-rebase semantics)"
-        result_tree=$(git -C "$PUBLIC_REPO" rev-parse --verify "$head_ref^{tree}" 2>/dev/null || echo "")
-        if [[ -z "$result_tree" ]]; then
-            log "ERROR: Protected-paths guard: could not resolve tree for $head_ref"
-            return 1
-        fi
-    fi
-
-    if ! git -C "$PUBLIC_REPO" rev-parse --verify "${result_tree}^{tree}" >/dev/null 2>&1; then
-        log "ERROR: Protected-paths guard: 'git merge-tree --write-tree' returned an unexpected value: '$result_tree'"
-        return 1
-    fi
-
-    local failed=0
-    local path base_blob result_blob
-    for path in "${protected_paths[@]}"; do
-        base_blob=$(git -C "$PUBLIC_REPO" rev-parse --verify "$base_ref:$path" 2>/dev/null || echo "")
-        result_blob=$(git -C "$PUBLIC_REPO" rev-parse --verify "$result_tree:$path" 2>/dev/null || echo "")
-
-        if [[ -z "$base_blob" ]]; then
-            # Path is not on public main. Two interpretations: (a) it was
-            # intentionally removed on public, or (b) it was lost in a prior
-            # wipe that has not yet been recovered. Either way, the sync branch
-            # cannot be expected to preserve content that no longer exists on
-            # the base. Skip silently.
-            log "Protected-paths guard: $path absent from public main — skipping"
-            continue
-        fi
-
-        if [[ -z "$result_blob" ]]; then
-            # Phrased "MISSING from sync branch" for historical continuity
-            # (tests grep this string); semantically the path is missing from
-            # the prospective post-rebase-merge tree, which means a real
-            # rebase-merge of this sync branch would delete the protected file.
-            log "ERROR: Protected-paths guard: $path is on public main (blob ${base_blob:0:8}) but MISSING from sync branch $SYNC_BRANCH"
-            failed=1
-            continue
-        fi
-
-        if [[ "$base_blob" != "$result_blob" ]]; then
-            # result_blob is the blob in the prospective post-rebase-merge tree
-            # (not the sync-branch-tip tree), which is what would actually land
-            # on public main after `gh pr merge --rebase`.
-            log "ERROR: Protected-paths guard: $path has divergent content — public main blob ${base_blob:0:8} vs prospective merge result blob ${result_blob:0:8}"
-            failed=1
-            continue
+    IFS=':' read -r -a paths <<< "$SYNC_ADDITIONAL_PATHS"
+    for raw in "${paths[@]}"; do
+        if [[ "$raw" == */ ]]; then
+            printf '%s\t%s\n' "prefix" "${raw%/}"
+        else
+            printf '%s\t%s\n' "file" "$raw"
         fi
     done
-
-    if [[ $failed -ne 0 ]]; then
-        log ""
-        log "Protected-paths guard FAILED — refusing to push a sync branch that"
-        log "would delete or modify public-only files."
-        log ""
-        log "Most common cause: a stale-marks or orphan-recovery code path"
-        log "produced a sync branch whose tree does not inherit current public"
-        log "main's workflow files. The marks state needs to be re-anchored."
-        log ""
-        log "Recovery procedure:"
-        log "  1. If the protected files are missing on public main itself,"
-        log "     restore them via a direct human PR (the human PR is the"
-        log "     audit trail; the sync App should not be the actor)."
-        log "  2. Trigger this sync workflow via workflow_dispatch with the"
-        log "     'seed_from_public_sha' input set to the current public main"
-        log "     HEAD. seed-marks-from-public.sh will validate tree-equivalence"
-        log "     over the include-set and re-pair the marks."
-        log "     Supply seed_from_private_sha when the matching private state is"
-        log "     older than HEAD, and use dry_run=true first."
-        log "  3. The next manual sync will resume with re-anchored marks."
-        log ""
-        log "See docs/repo-sync-automation.md for the full recovery procedure."
-        return 1
-    fi
-
-    log "Protected-paths guard passed (${#protected_paths[@]} path(s) checked against prospective merge of $head_ref into $base_ref)"
-    return 0
 }
 
 # ── State management ──────────────────────────────────────────────────────────
@@ -628,8 +464,8 @@ run_fast_export() {
     # recovery anchors all marks at PUBLIC_SHA), each new sync-branch commit's
     # tree then represents a DELETE of all excluded paths (`.github/`, etc.)
     # relative to that parent's tree. A rebase-merge of that sync branch into
-    # public main correctly wipes those files, and the protected-paths guard
-    # fires. Instead, we emit a delta-mode stream (M/D ops vs the marks-
+    # public main correctly wipes those files, and the generated-diff guard
+    # rejects the result. Instead, we emit a delta-mode stream (M/D ops vs the marks-
     # anchored parent) and apply the include-set filter in filter-stream.py.
     # `--no-renames` decomposes renames into D+M pairs so the filter handles
     # each side independently — a rename out of the include-set becomes a
@@ -668,6 +504,31 @@ run_filter() {
     if [[ -n "$source_ref" && -n "$target_ref" ]]; then
         ref_args=(--source-ref "$source_ref" --target-ref "$target_ref")
     fi
+    # Materialize the positive default scope plus operator-supplied additions.
+    local -a include_args=()
+    local include_path include_type
+    while IFS=$'\t' read -r include_type include_path; do
+        [[ -z "$include_path" ]] && continue
+        if [[ "$include_type" == "prefix" ]]; then
+            include_args+=(--include-prefix "$include_path")
+        else
+            include_args+=(--include-file "$include_path")
+        fi
+    done < <(build_default_include_args)
+    while IFS=$'\t' read -r include_type include_path; do
+        [[ -z "$include_path" ]] && continue
+        if [[ "$include_type" == "prefix" ]]; then
+            include_args+=(--include-prefix "$include_path")
+        else
+            include_args+=(--include-file "$include_path")
+        fi
+    done < <(build_additional_include_args)
+
+    if [[ ${#include_args[@]} -eq 0 ]]; then
+        log "ERROR: sync config produced an empty include scope"
+        return 1
+    fi
+
     # Materialize --exclude-path args from sync-config + SYNC_BLOCKED_PATHS.
     # Build the array carefully so an empty exclude list produces zero
     # args (vs a stray empty string).
@@ -682,7 +543,8 @@ run_filter() {
         [[ -z "$exclude_basename" ]] && continue
         exclude_args+=(--exclude-basename "$exclude_basename")
     done < <(build_filter_exclude_basenames)
-    python3 "$FILTER_SCRIPT" --mailmap "$MAILMAP_FILE" "${ref_args[@]}" "${exclude_args[@]}" \
+    python3 "$FILTER_SCRIPT" --mailmap "$MAILMAP_FILE" "${ref_args[@]}" \
+        "${include_args[@]}" "${exclude_args[@]}" \
         < "$input" > "$output" 2>"$output.err" || {
         log "ERROR: Filter failed"
         cat "$output.err" >&2
@@ -759,188 +621,189 @@ run_fast_import() {
     return 1
 }
 
-# Copy CODEOWNERS from private to public if it changed.
-# Returns 0 if a change was made (caller may want to amend or commit), 1 if unchanged.
-sync_codeowners() {
-    local src="$PRIVATE_REPO/.github/CODEOWNERS"
-    local dst="$PUBLIC_REPO/.github/CODEOWNERS"
+path_matches_exclusions() {
+    local path="$1"
+    local prefixes_name="$2"
+    local basenames_name="$3"
+    local -n prefixes="$prefixes_name"
+    local -n basenames="$basenames_name"
+    local prefix basename
 
-    if [[ ! -f "$src" ]]; then
-        log "No CODEOWNERS in private repo — skipping"
-        return 1
-    fi
-
-    # Check the public repo's HEAD on the sync branch (or main if branch doesn't exist yet)
-    local ref="$SYNC_BRANCH"
-    if ! git -C "$PUBLIC_REPO" rev-parse --verify "refs/heads/$ref" >/dev/null 2>&1; then
-        ref="main"
-    fi
-
-    local existing=""
-    if existing=$(git -C "$PUBLIC_REPO" show "$ref:.github/CODEOWNERS" 2>/dev/null); then
-        if [[ "$existing" == "$(cat "$src")" ]]; then
-            log "CODEOWNERS unchanged"
-            return 1
+    for prefix in "${prefixes[@]:-}"; do
+        [[ -z "$prefix" ]] && continue
+        if [[ "$path" == "$prefix" || "$path" == "$prefix"/* ]]; then
+            return 0
         fi
-    fi
-
-    log "CODEOWNERS differs — will sync"
-    return 0
-}
-
-# Check whether the public-overlay/ tree differs from public.
-# Returns 0 if at least one overlay file is missing or differs on the public side
-# (caller will apply), 1 if every overlay file already matches public.
-#
-# The overlay mechanism exists because git fast-import does not merge with prior
-# public state — anything not in the import stream is wiped on fresh-marks
-# rebuilds. Files placed at private:public-overlay/<path> are restored to
-# public:<path> after import. See ADO 5255033 / Feature 5255019.
-sync_public_overlay() {
-    local overlay_root="$PRIVATE_REPO/public-overlay"
-
-    if [[ ! -d "$overlay_root" ]]; then
-        log "No public-overlay/ directory in private repo — skipping"
-        return 1
-    fi
-
-    # Empty directory → no-op
-    if [[ -z "$(find "$overlay_root" -mindepth 1 -type f -print -quit 2>/dev/null)" ]]; then
-        log "public-overlay/ is empty — skipping"
-        return 1
-    fi
-
-    # Compare against the public sync branch if it already exists, else main.
-    local ref="$SYNC_BRANCH"
-    if ! git -C "$PUBLIC_REPO" rev-parse --verify "refs/heads/$ref" >/dev/null 2>&1; then
-        ref="main"
-    fi
-
-    local rel existing
-    while IFS= read -r -d '' file; do
-        rel="${file#"$overlay_root"/}"
-        if existing=$(git -C "$PUBLIC_REPO" show "$ref:$rel" 2>/dev/null); then
-            if [[ "$existing" == "$(cat "$file")" ]]; then
-                continue
-            fi
+    done
+    basename="${path##*/}"
+    for prefix in "${basenames[@]:-}"; do
+        if [[ "$basename" == "$prefix" ]]; then
+            return 0
         fi
-        log "public-overlay/$rel differs from public:$rel — will sync"
-        return 0
-    done < <(find "$overlay_root" -type f -print0)
-
-    log "public-overlay/ unchanged"
+    done
     return 1
 }
 
-# Apply CODEOWNERS as a commit on the sync branch.
-# If the sync branch already has imported commits, amend into the last one.
-# If no imported commits exist, create a standalone bot commit.
-apply_codeowners() {
-    local src="$PRIVATE_REPO/.github/CODEOWNERS"
-    local has_imports="$1"  # "1" if imports happened, "0" otherwise
+assert_safe_reconciliation_ancestors() {
+    local ref="$1"
+    local path="$2"
+    local current=""
+    local entry mode
+    local -a components=()
+    local i
 
-    # If imports happened, the sync branch already exists — check it out without -B
-    # (which would reset it to HEAD and lose the imported commits).
-    # If no imports happened, create the sync branch from main.
-    if git -C "$PUBLIC_REPO" rev-parse --verify "refs/heads/$SYNC_BRANCH" >/dev/null 2>&1; then
-        git -C "$PUBLIC_REPO" checkout "$SYNC_BRANCH" --quiet
-    elif [[ "$has_imports" == "1" ]]; then
-        # Imports were reported as successful but the sync branch is missing.
-        # This means fast-import wrote the imported commits to a different ref —
-        # almost certainly the refspec rewrite didn't take effect. Fail loudly
-        # rather than silently creating an empty branch from main.
-        log "ERROR: imports reported but refs/heads/$SYNC_BRANCH is missing"
-        log "  fast-import likely wrote to a different ref name. Existing refs:"
-        git -C "$PUBLIC_REPO" for-each-ref --format='    %(refname)' refs/heads >&2 || true
-        return 1
-    else
-        # No imports — create sync branch from main
-        git -C "$PUBLIC_REPO" checkout -B "$SYNC_BRANCH" main --quiet 2>/dev/null || \
-        git -C "$PUBLIC_REPO" checkout -B "$SYNC_BRANCH" --quiet
-    fi
-
-    mkdir -p "$PUBLIC_REPO/.github"
-    cp "$src" "$PUBLIC_REPO/.github/CODEOWNERS"
-    git -C "$PUBLIC_REPO" add .github/CODEOWNERS
-
-    if ! git -C "$PUBLIC_REPO" diff --cached --quiet; then
-        if [[ "$has_imports" == "1" ]]; then
-            log "Amending CODEOWNERS into last imported commit"
-            GIT_COMMITTER_NAME="foundry-samples-sync[bot]" \
-            GIT_COMMITTER_EMAIL="foundry-samples-sync[bot]@users.noreply.github.com" \
-            git -C "$PUBLIC_REPO" commit --amend --no-edit --quiet
-        else
-            log "Creating standalone bot commit for CODEOWNERS"
-            GIT_AUTHOR_NAME="foundry-samples-sync[bot]" \
-            GIT_AUTHOR_EMAIL="foundry-samples-sync[bot]@users.noreply.github.com" \
-            GIT_COMMITTER_NAME="foundry-samples-sync[bot]" \
-            GIT_COMMITTER_EMAIL="foundry-samples-sync[bot]@users.noreply.github.com" \
-            git -C "$PUBLIC_REPO" commit -m "chore: sync CODEOWNERS" --quiet
+    IFS='/' read -r -a components <<< "$path"
+    for ((i = 0; i + 1 < ${#components[@]}; i++)); do
+        current="${current:+$current/}${components[$i]}"
+        entry=$(git -C "$PUBLIC_REPO" ls-tree "$ref" -- "$current")
+        mode="${entry%% *}"
+        if [[ "$mode" == "120000" || -L "$PUBLIC_REPO/$current" ]]; then
+            log "ERROR: refusing to reconcile '$path' through symlink ancestor '$current'"
+            return 1
         fi
-        return 0
-    else
-        log "No CODEOWNERS staging diff — nothing to commit"
-        return 0
-    fi
+    done
+    return 0
 }
 
-# Apply public-overlay/ files as a commit on the sync branch.
-# Each file at private:public-overlay/<path> is copied to public:<path>
-# (NOT public:public-overlay/<path>). If the sync branch already has imported
-# commits, amend into the last one. Otherwise create a standalone bot commit.
-#
-# The bot identity matches apply_codeowners so authorship is consistent across
-# both overlay mechanisms. CODEOWNERS continues to live in its own dedicated
-# function (parallel mechanism); consolidation tracked separately.
-apply_public_overlay() {
-    local overlay_root="$PRIVATE_REPO/public-overlay"
-    local has_imports="$1"  # "1" if imports happened, "0" otherwise
+collect_reconciliation_paths() {
+    local repo="$1"
+    local ref="$2"
+    local include_type="$3"
+    local bare="$4"
+    local output_name="$5"
+    local -n output="$output_name"
+    local root_entry root_meta root_type entry meta path mode type oid
+    local -a entries=()
 
-    if git -C "$PUBLIC_REPO" rev-parse --verify "refs/heads/$SYNC_BRANCH" >/dev/null 2>&1; then
-        git -C "$PUBLIC_REPO" checkout "$SYNC_BRANCH" --quiet
-    elif [[ "$has_imports" == "1" ]]; then
-        log "ERROR: imports reported but refs/heads/$SYNC_BRANCH is missing (public-overlay)"
-        log "  fast-import likely wrote to a different ref name. Existing refs:"
-        git -C "$PUBLIC_REPO" for-each-ref --format='    %(refname)' refs/heads >&2 || true
+    root_entry=$(git -C "$repo" ls-tree "$ref" -- "$bare")
+    [[ -z "$root_entry" ]] && return 0
+    root_meta="${root_entry%%$'\t'*}"
+    root_type=$(awk '{ print $2 }' <<< "$root_meta")
+
+    if [[ "$include_type" == "file" ]]; then
+        if [[ "$root_type" != "blob" ]]; then
+            log "ERROR: additional file '$bare' resolves to a $root_type"
+            return 1
+        fi
+        mode=$(awk '{ print $1 }' <<< "$root_meta")
+        oid=$(awk '{ print $3 }' <<< "$root_meta")
+        output["$bare"]="$mode:$oid"
+        return 0
+    fi
+
+    if [[ "$root_type" != "tree" ]]; then
+        log "ERROR: included directory '$bare/' resolves to a $root_type"
         return 1
-    else
-        git -C "$PUBLIC_REPO" checkout -B "$SYNC_BRANCH" main --quiet 2>/dev/null || \
-        git -C "$PUBLIC_REPO" checkout -B "$SYNC_BRANCH" --quiet
     fi
 
-    # Copy each overlay file to its target path under PUBLIC_REPO. Use -print0
-    # so paths with whitespace or special characters are preserved, and cp -p so
-    # mode bits (executable, etc.) are carried over.
-    local rel parent_dir
-    while IFS= read -r -d '' file; do
-        rel="${file#"$overlay_root"/}"
-        parent_dir="$(dirname -- "$rel")"
-        if [[ "$parent_dir" != "." ]]; then
-            mkdir -p -- "$PUBLIC_REPO/$parent_dir"
+    mapfile -d '' -t entries < <(git -C "$repo" ls-tree -r -z "$ref" -- "$bare")
+    for entry in "${entries[@]}"; do
+        meta="${entry%%$'\t'*}"
+        path="${entry#*$'\t'}"
+        read -r mode type oid <<< "$meta"
+        if [[ "$type" != "blob" ]]; then
+            log "ERROR: included path '$path' has unsupported git object type '$type'"
+            return 1
         fi
-        cp -p -- "$file" "$PUBLIC_REPO/$rel"
-        git -C "$PUBLIC_REPO" add -- "$rel"
-    done < <(find "$overlay_root" -type f -print0)
+        output["$path"]="$mode:$oid"
+    done
+}
 
-    if ! git -C "$PUBLIC_REPO" diff --cached --quiet; then
-        if [[ "$has_imports" == "1" ]]; then
-            log "Amending public-overlay into last imported commit"
-            GIT_COMMITTER_NAME="foundry-samples-sync[bot]" \
-            GIT_COMMITTER_EMAIL="foundry-samples-sync[bot]@users.noreply.github.com" \
-            git -C "$PUBLIC_REPO" commit --amend --no-edit --quiet
-        else
-            log "Creating standalone bot commit for public-overlay"
-            GIT_AUTHOR_NAME="foundry-samples-sync[bot]" \
-            GIT_AUTHOR_EMAIL="foundry-samples-sync[bot]@users.noreply.github.com" \
-            GIT_COMMITTER_NAME="foundry-samples-sync[bot]" \
-            GIT_COMMITTER_EMAIL="foundry-samples-sync[bot]@users.noreply.github.com" \
-            git -C "$PUBLIC_REPO" commit -m "chore: sync public overlay" --quiet
-        fi
-        return 0
+reconcile_allowed_paths() {
+    local target_ref=""
+    if git -C "$PUBLIC_REPO" rev-parse --verify "refs/heads/$SYNC_BRANCH" >/dev/null 2>&1; then
+        target_ref="refs/heads/$SYNC_BRANCH"
+    elif git -C "$PUBLIC_REPO" rev-parse --verify refs/heads/main >/dev/null 2>&1; then
+        target_ref="refs/heads/main"
     else
-        log "No public-overlay staging diff — nothing to commit"
-        return 0
+        return 2
     fi
+
+    local -a include_types=() include_paths=()
+    local path include_type
+    while IFS=$'\t' read -r include_type path; do
+        [[ -z "$path" ]] && continue
+        include_types+=("$include_type")
+        include_paths+=("$path")
+    done < <(build_default_include_args)
+    while IFS=$'\t' read -r include_type path; do
+        [[ -z "$path" ]] && continue
+        include_types+=("$include_type")
+        include_paths+=("$path")
+    done < <(build_additional_include_args)
+
+    local -a exclude_paths=() exclude_basenames=()
+    mapfile -t exclude_paths < <(build_filter_exclude_paths)
+    mapfile -t exclude_basenames < <(build_filter_exclude_basenames)
+
+    local -A private_files=() public_files=()
+    local i
+    for ((i = 0; i < ${#include_paths[@]}; i++)); do
+        collect_reconciliation_paths "$PRIVATE_REPO" "$SOURCE_REF" \
+            "${include_types[$i]}" "${include_paths[$i]}" private_files || return 1
+        collect_reconciliation_paths "$PUBLIC_REPO" "$target_ref" \
+            "${include_types[$i]}" "${include_paths[$i]}" public_files || return 1
+    done
+
+    local needs_reconciliation=0
+    for path in "${!public_files[@]}"; do
+        path_matches_exclusions "$path" exclude_paths exclude_basenames && continue
+        if [[ -z "${private_files[$path]:-}" ]]; then
+            needs_reconciliation=1
+            break
+        fi
+    done
+    if [[ $needs_reconciliation -eq 0 ]]; then
+        for path in "${!private_files[@]}"; do
+            path_matches_exclusions "$path" exclude_paths exclude_basenames && continue
+            if [[ "${private_files[$path]}" != "${public_files[$path]:-}" ]]; then
+                needs_reconciliation=1
+                break
+            fi
+        done
+    fi
+    [[ $needs_reconciliation -eq 0 ]] && return 2
+
+    for path in "${!public_files[@]}"; do
+        path_matches_exclusions "$path" exclude_paths exclude_basenames && continue
+        [[ -n "${private_files[$path]:-}" ]] && continue
+        assert_safe_reconciliation_ancestors "$target_ref" "$path" || return 1
+    done
+    for path in "${!private_files[@]}"; do
+        path_matches_exclusions "$path" exclude_paths exclude_basenames && continue
+        [[ "${private_files[$path]}" == "${public_files[$path]:-}" ]] && continue
+        assert_safe_reconciliation_ancestors "$target_ref" "$path" || return 1
+    done
+
+    if [[ "$target_ref" == "refs/heads/main" ]]; then
+        git -C "$PUBLIC_REPO" branch "$SYNC_BRANCH" "$target_ref"
+    fi
+    git -C "$PUBLIC_REPO" checkout --quiet "$SYNC_BRANCH"
+
+    for path in "${!public_files[@]}"; do
+        path_matches_exclusions "$path" exclude_paths exclude_basenames && continue
+        if [[ -z "${private_files[$path]:-}" ]]; then
+            rm -rf -- "$PUBLIC_REPO/$path"
+        fi
+    done
+    for path in "${!private_files[@]}"; do
+        path_matches_exclusions "$path" exclude_paths exclude_basenames && continue
+        [[ "${private_files[$path]}" == "${public_files[$path]:-}" ]] && continue
+        rm -rf -- "$PUBLIC_REPO/$path"
+        git -C "$PRIVATE_REPO" archive "$SOURCE_REF" -- "$path" \
+            | tar -xf - -C "$PUBLIC_REPO"
+    done
+
+    git -C "$PUBLIC_REPO" add -A
+    if git -C "$PUBLIC_REPO" diff --cached --quiet; then
+        return 2
+    fi
+    git -C "$PUBLIC_REPO" \
+        -c user.name="foundry-samples sync" \
+        -c user.email="foundry-samples-sync@users.noreply.github.com" \
+        commit --quiet -m "Reconcile allowed sync paths"
+    log "Reconciled current private content over the allowed sync scope"
+    return 0
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -952,6 +815,11 @@ main() {
     fi
 
     require_env
+    if ! SYNC_ADDITIONAL_PATHS="$(bash "$SCOPE_ASSERT_SCRIPT" \
+        --normalize-only "${SYNC_ADDITIONAL_PATHS:-}")"; then
+        fail_closed "INVALID_ADDITIONAL_PATHS"
+    fi
+    export SYNC_ADDITIONAL_PATHS
     setup_marks_state
     check_marks_validity
 
@@ -1001,31 +869,7 @@ main() {
     run_filter "$export_stream" "$filtered_stream" \
         "refs/heads/main" "refs/heads/$SYNC_BRANCH"
 
-    # Step 3: Check public-overlay + CODEOWNERS BEFORE deciding "nothing to sync"
-    # (overlay-only and CODEOWNERS-only changes still need a public commit even
-    # when no private code changed.)
-    local overlay_available=0
-    if [[ -d "$PRIVATE_REPO/public-overlay" \
-        && -n "$(find "$PRIVATE_REPO/public-overlay" -mindepth 1 -type f -print -quit 2>/dev/null)" ]]; then
-        overlay_available=1
-    fi
-
-    local overlay_changed=0
-    if sync_public_overlay; then
-        overlay_changed=1
-    fi
-
-    local codeowners_available=0
-    if [[ -f "$PRIVATE_REPO/.github/CODEOWNERS" ]]; then
-        codeowners_available=1
-    fi
-
-    local codeowners_changed=0
-    if sync_codeowners; then
-        codeowners_changed=1
-    fi
-
-    # Step 4: Import (if there are commits)
+    # Step 3: Import (if there are commits)
     local has_imports=0
     local import_result=0
     run_fast_import "$filtered_stream" && import_result=$? || import_result=$?
@@ -1102,8 +946,20 @@ main() {
     fi
     # import_result==2 means no commits, that's fine
 
+    # Step 4: Reconcile the current allowed tree. Marks intentionally remain
+    # scope-independent, so this materializes paths that become eligible after
+    # their original commits were already marked (additional paths or samples
+    # released from a prior validation block-list).
+    local reconcile_result=0
+    reconcile_allowed_paths && reconcile_result=$? || reconcile_result=$?
+    if [[ $reconcile_result -eq 0 ]]; then
+        has_imports=1
+    elif [[ $reconcile_result -ne 2 ]]; then
+        fail_closed "RECONCILIATION_FAILED"
+    fi
+
     # Step 5: Decide whether to do anything else
-    if [[ $has_imports -eq 0 && $codeowners_changed -eq 0 && $overlay_changed -eq 0 ]]; then
+    if [[ $has_imports -eq 0 ]]; then
         log "Nothing to sync — clean exit"
         # Even on no-op, the source SHA is reconciled with public main (the
         # filtered stream was empty, meaning every commit in
@@ -1116,35 +972,24 @@ main() {
         exit 0
     fi
 
-    # Step 6: Apply public-overlay first, then CODEOWNERS.
-    # Order matters: when both apply with imports, CODEOWNERS amends last so its
-    # state is the final one on the imported commit. When both apply without
-    # imports, each function creates its own standalone bot commit (acceptable —
-    # both happen on the same sync branch).
-    if [[ $overlay_available -eq 1 && ( $has_imports -eq 1 || $overlay_changed -eq 1 ) ]]; then
-        apply_public_overlay "$has_imports"
-    fi
-
-    # Step 7: Apply CODEOWNERS (if changed, or after imports may have removed it)
-    if [[ $codeowners_available -eq 1 && ( $has_imports -eq 1 || $codeowners_changed -eq 1 ) ]]; then
-        apply_codeowners "$has_imports"
-    fi
-
-    # Step 8: Verify sync branch exists
+    # Step 6: Verify sync branch exists
     if ! git -C "$PUBLIC_REPO" rev-parse --verify "refs/heads/$SYNC_BRANCH" >/dev/null 2>&1; then
         log "ERROR: Sync branch $SYNC_BRANCH was not created"
         emit_output "has_changes" "false"
         exit 1
     fi
 
-    # Step 8.5: Protected-paths invariant — fail-stop before push if any
-    # public-only file would be deleted or modified by this sync branch.
-    if ! guard_protected_paths; then
-        emit_output "has_changes" "false"
-        exit 1
+    # Step 7: Final path-scope invariant against the prospective merge result.
+    if ! bash "$SCOPE_ASSERT_SCRIPT" \
+        --repo "$PUBLIC_REPO" \
+        --base-ref main \
+        --head-ref "refs/heads/$SYNC_BRANCH" \
+        --config "$CONFIG_FILE" \
+        --additional-paths "$SYNC_ADDITIONAL_PATHS"; then
+        fail_closed "SYNC_SCOPE_VIOLATION"
     fi
 
-    # Step 9: Emit summary outputs
+    # Step 8: Emit summary outputs
     local commit_count authors
     if [[ -n "$public_head_before" ]]; then
         commit_count=$(git -C "$PUBLIC_REPO" rev-list --count "${public_head_before}..${SYNC_BRANCH}" 2>/dev/null || echo 0)
@@ -1165,7 +1010,7 @@ main() {
         # Sentinel reflects what we just reconciled — write it even in dry-run.
         # The workflow's cache-save step is gated on dry_run=false (except for
         # seed_from_public_sha dispatches, which DO save), so dry-run-only
-        # local writes won't pollute scheduled-run state.
+        # local writes won't pollute the next operator-run state.
         write_last_synced_sentinel "$current_source_sha"
         exit 0
     fi

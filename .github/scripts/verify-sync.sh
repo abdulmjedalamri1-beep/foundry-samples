@@ -2,8 +2,8 @@
 #
 # verify-sync.sh — Post-sync drift verification.
 #
-# Compares the file tree of the private repo's HEAD (after applying
-# exclude_pathspecs from sync-config.json) against the public repo's HEAD.
+# Compares the configured positive sync scope in the private repo's HEAD
+# (after exclusions) against the same scope in the public repo's HEAD.
 # Drift = any file present in one set but not the other, or with differing
 # blob content. Authorship/history is intentionally NOT checked here — that
 # is verified separately by the sync workflow's mailmap and filter-stream.
@@ -22,6 +22,8 @@
 #                       prevents a window of red CI when verify-sync runs
 #                       between a sync that excluded a blocked sample and
 #                       the validation pipeline turning that sample green.
+#   SYNC_ADDITIONAL_PATHS Optional colon-separated exact files or trailing-slash
+#                         directories included for this verification.
 #
 # Outputs (to fd 3, which the caller redirects to $GITHUB_OUTPUT):
 #   drift=true|false
@@ -44,14 +46,19 @@ PUBLIC_DIR="${2:?missing public repo dir}"
 CONFIG_FILE="${3:?missing sync-config.json path}"
 
 # ── Load excludes ────────────────────────────────────────────────────────────
-mapfile -t EXCLUDE_SPECS < <(jq -r '.exclude_pathspecs[]' "$CONFIG_FILE")
+mapfile -t EXCLUDE_SPECS < <(jq -r '.exclude_pathspecs[]' "$CONFIG_FILE" | tr -d '\r')
+mapfile -t INCLUDE_PATHS < <(jq -r '.default_include_paths[]' "$CONFIG_FILE" | tr -d '\r')
+if [[ -n "${SYNC_ADDITIONAL_PATHS:-}" ]]; then
+    IFS=':' read -r -a _additional <<< "$SYNC_ADDITIONAL_PATHS"
+    INCLUDE_PATHS+=("${_additional[@]}")
+fi
 
 # Optional basename excludes (e.g. ".ci-skip" / ".code-ci-skip") — scattered
 # internal marker files matched by final path component, not prefix. The key is
 # optional; `[]?` tolerates its absence. Mirrors filter-stream.py's
 # --exclude-basename and is applied bidirectionally below so neither private nor
 # public marker files register as drift.
-mapfile -t EXCLUDE_BASENAMES < <(jq -r '.exclude_basenames[]? // empty' "$CONFIG_FILE")
+mapfile -t EXCLUDE_BASENAMES < <(jq -r '.exclude_basenames[]? // empty' "$CONFIG_FILE" | tr -d '\r')
 
 # Convert pathspec (":!path/" or ":(exclude)path") to bare path "path"
 spec_to_path() {
@@ -77,11 +84,25 @@ normalize_blocked() {
     printf '%s' "$p"
 }
 
+additional_overrides_exclusion() {
+    local excluded="$1"
+    local allowed bare
+    for allowed in "${_additional[@]:-}"; do
+        bare="${allowed%/}"
+        if [[ "$bare" == "$excluded" || "$bare" == "$excluded"/* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Pre-compute bare exclude paths for fast membership checks
 declare -a EXCLUDE_PATHS=()
 for spec in "${EXCLUDE_SPECS[@]:-}"; do
     [[ -z "$spec" ]] && continue
-    EXCLUDE_PATHS+=("$(spec_to_path "$spec")")
+    bare_spec="$(spec_to_path "$spec")"
+    additional_overrides_exclusion "$bare_spec" && continue
+    EXCLUDE_PATHS+=("$bare_spec")
 done
 
 # Layer dynamic block-list on top of static excludes.
@@ -120,17 +141,35 @@ is_excluded() {
     return 1
 }
 
+is_included() {
+    local path="$1"
+    local allowed bare
+    for allowed in "${INCLUDE_PATHS[@]}"; do
+        if [[ "$allowed" == */ ]]; then
+            bare="${allowed%/}"
+            if [[ "$path" == "$bare" || "$path" == "$bare"/* ]]; then
+                return 0
+            fi
+        elif [[ "$path" == "$allowed" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 echo "Private dir:   $PRIVATE_DIR"
 echo "Public dir:    $PUBLIC_DIR"
 echo "Excludes:      ${EXCLUDE_PATHS[*]:-<none>}"
+echo "Includes:      ${INCLUDE_PATHS[*]:-<none>}"
 echo "Basenames:     ${EXCLUDE_BASENAMES[*]:-<none>}"
 echo "Block-list:    ${BLOCKED_PATHS[*]:-<none>}"
 
 # ── Build expected and actual maps (path → blob sha) ─────────────────────────
-declare -A EXPECTED ACTUAL
+declare -A EXPECTED=() ACTUAL=()
 
 while IFS=$'\t' read -r meta path; do
     [[ -z "$path" ]] && continue
+    is_included "$path" || continue
     is_excluded "$path" && continue
     sha="${meta##* }"
     EXPECTED["$path"]="$sha"
@@ -138,6 +177,7 @@ done < <(git -C "$PRIVATE_DIR" ls-tree -r HEAD)
 
 while IFS=$'\t' read -r meta path; do
     [[ -z "$path" ]] && continue
+    is_included "$path" || continue
     # Exclusions are bidirectional: paths that sync doesn't manage should not be
     # checked for drift in either direction. Public may legitimately contain
     # files in excluded paths (e.g., a public-only .github/CODEOWNERS).

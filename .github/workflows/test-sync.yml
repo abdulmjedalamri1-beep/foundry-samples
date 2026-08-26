@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/scripts/sync-core.sh'
       - '.github/scripts/wait-and-merge.sh'
+      - '.github/scripts/assert-sync-scope.sh'
       - '.github/scripts/filter-stream.py'
       - '.github/tests/test-sync.sh'
       - '.github/tests/test-sync-workflow.py'

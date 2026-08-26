@@ -15,6 +15,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 FILTER_SCRIPT="$REPO_ROOT/.github/scripts/filter-stream.py"
 SYNC_SCRIPT="$REPO_ROOT/.github/scripts/sync-core.sh"
 SEED_MARKS_SCRIPT="$REPO_ROOT/.github/scripts/seed-marks-from-public.sh"
+SCOPE_ASSERT_SCRIPT="$REPO_ROOT/.github/scripts/assert-sync-scope.sh"
 WORKFLOW_CONTRACT_TEST="$REPO_ROOT/.github/tests/test-sync-workflow.py"
 
 # ── Test framework ─────────────────────────────────────────────────────────────
@@ -796,7 +797,7 @@ test_T7
 test_T11
 test_T16
 
-# CODEOWNERS (T4, T18, T19, T20, T27 — T18-T27 depend on sync-core.sh)
+# .github/ remains excluded from the exported stream.
 test_T4
 
 # Incremental sync
@@ -826,9 +827,25 @@ test_T25
 setup_sync_core_env() {
     SYNC_BRANCH="sync/test-$$-${TESTS_RUN}"
     CONFIG_FILE="$WORK_DIR/sync-config.json"
+    local include_json
+    include_json=$(python3 - "$PRIVATE" <<'PY'
+import json
+import os
+import sys
+
+repo = sys.argv[1]
+defaults = {"infrastructure/", "samples/"}
+excluded = {".git", ".github", "internal", "docs", "public-overlay", "README.md", "CONTRIBUTING.md"}
+for name in os.listdir(repo):
+    if name not in excluded:
+        defaults.add(name + "/" if os.path.isdir(os.path.join(repo, name)) else name)
+print(json.dumps(sorted(defaults)))
+PY
+)
     cat > "$CONFIG_FILE" <<EOF
 {
-  "exclude_pathspecs": [":!internal/", ":!.github/", ":!public-overlay/"],
+  "default_include_paths": $include_json,
+  "exclude_pathspecs": [":!internal/", ":!.github/"],
   "public_repo": {"owner": "test", "name": "test"},
   "sync_branch_prefix": "sync/test"
 }
@@ -857,125 +874,6 @@ run_sync_core() {
     return $exit_code
 }
 
-test_T18() {
-    run_test "T18" "sync-core.sh: full pipeline with CODEOWNERS"
-    setup_repos
-
-    mkdir -p "$PRIVATE/.github"
-    echo "* @team-foo" > "$PRIVATE/.github/CODEOWNERS"
-    echo "code" > "$PRIVATE/code.txt"
-    cd "$PRIVATE" && git add -A && cd - >/dev/null
-    GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@example.com" \
-    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@example.com" \
-    git -C "$PRIVATE" commit -m "Add code and CODEOWNERS" --quiet
-
-    if run_sync_core; then
-        # Verify sync branch has the commit + CODEOWNERS
-        if git -C "$PUBLIC" rev-parse --verify "refs/heads/$SYNC_BRANCH" >/dev/null 2>&1; then
-            local has_code has_codeowners
-            has_code=$(git -C "$PUBLIC" show "$SYNC_BRANCH:code.txt" 2>/dev/null || echo "")
-            has_codeowners=$(git -C "$PUBLIC" show "$SYNC_BRANCH:.github/CODEOWNERS" 2>/dev/null || echo "")
-            if [[ "$has_code" == "code" && "$has_codeowners" == "* @team-foo" ]]; then
-                pass "T18"
-            else
-                fail "T18" "Missing code or CODEOWNERS on sync branch (code='$has_code' codeowners='$has_codeowners')"
-            fi
-        else
-            fail "T18" "Sync branch not created"
-        fi
-    else
-        fail "T18" "sync-core.sh exited non-zero: $(cat "$WORK_DIR/sync-core.err")"
-    fi
-    cleanup
-}
-
-test_T19() {
-    run_test "T19" "sync-core.sh: CODEOWNERS amends into last imported commit"
-    setup_repos
-
-    mkdir -p "$PRIVATE/.github"
-    echo "* @team-bar" > "$PRIVATE/.github/CODEOWNERS"
-    echo "code" > "$PRIVATE/code.txt"
-    cd "$PRIVATE" && git add -A && cd - >/dev/null
-    GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@example.com" \
-    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@example.com" \
-    git -C "$PRIVATE" commit -m "Initial sync" --quiet
-
-    run_sync_core || { fail "T19" "Initial sync failed"; cleanup; return; }
-
-    local count_after_first head_after_first
-    count_after_first=$(git -C "$PUBLIC" rev-list --count "$SYNC_BRANCH" 2>/dev/null || echo 0)
-    head_after_first=$(git -C "$PUBLIC" rev-parse "$SYNC_BRANCH")
-
-    # Reset public repo state so subsequent sync redoes work (simulate fresh run, but keep marks)
-    # Actually for amend test: add a new code commit + change CODEOWNERS in same private commit
-    echo "more code" > "$PRIVATE/code2.txt"
-    echo "* @team-quux" > "$PRIVATE/.github/CODEOWNERS"
-    cd "$PRIVATE" && git add -A && cd - >/dev/null
-    GIT_AUTHOR_NAME="Dev2" GIT_AUTHOR_EMAIL="dev2@example.com" \
-    GIT_COMMITTER_NAME="Dev2" GIT_COMMITTER_EMAIL="dev2@example.com" \
-    git -C "$PRIVATE" commit -m "Add more code and update CODEOWNERS" --quiet
-
-    if ! run_sync_core; then
-        fail "T19" "Second sync failed: $(cat "$WORK_DIR/sync-core.err")"
-        cleanup; return
-    fi
-
-    local count_after_second last_author last_codeowners
-    count_after_second=$(git -C "$PUBLIC" rev-list --count "$SYNC_BRANCH" 2>/dev/null || echo 0)
-    last_author=$(git -C "$PUBLIC" log -1 --format="%an" "$SYNC_BRANCH")
-    last_codeowners=$(git -C "$PUBLIC" show "$SYNC_BRANCH:.github/CODEOWNERS" 2>/dev/null)
-
-    # Expect: exactly 1 new commit (amend doesn't add commit, but the new code commit does)
-    # So count = count_after_first + 1, and last commit is by Dev2 (author preserved, not bot)
-    local expected_count=$((count_after_first + 1))
-    if [[ "$count_after_second" != "$expected_count" ]]; then
-        fail "T19" "Expected $expected_count commits after amend, got $count_after_second"
-    elif [[ "$last_author" != "Dev2" ]]; then
-        fail "T19" "Expected last commit author 'Dev2' (amended), got '$last_author' (would indicate standalone bot commit)"
-    elif [[ "$last_codeowners" != "* @team-quux" ]]; then
-        fail "T19" "Expected CODEOWNERS amended into last commit, got '$last_codeowners'"
-    else
-        pass "T19"
-    fi
-    cleanup
-}
-
-test_T20() {
-    run_test "T20" "sync-core.sh: CODEOWNERS-only change creates standalone bot commit"
-    setup_repos
-
-    # First, sync some code (no CODEOWNERS yet)
-    echo "code" > "$PRIVATE/code.txt"
-    commit_as "$PRIVATE" "Dev" "dev@example.com" "Add code" code.txt
-
-    run_sync_core || { fail "T20" "First sync failed"; cleanup; return; }
-
-    local first_branch_head
-    first_branch_head=$(git -C "$PUBLIC" rev-parse "$SYNC_BRANCH")
-
-    # Now ONLY add CODEOWNERS (no code change)
-    mkdir -p "$PRIVATE/.github"
-    echo "* @team-baz" > "$PRIVATE/.github/CODEOWNERS"
-    cd "$PRIVATE" && git add -A && cd - >/dev/null
-    GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@example.com" \
-    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@example.com" \
-    git -C "$PRIVATE" commit -m "Add CODEOWNERS only" --quiet
-
-    if run_sync_core; then
-        local last_commit_author
-        last_commit_author=$(git -C "$PUBLIC" log -1 --format="%an" "$SYNC_BRANCH")
-        if [[ "$last_commit_author" == *"sync"* ]] || [[ "$last_commit_author" == *"bot"* ]]; then
-            pass "T20"
-        else
-            fail "T20" "Expected bot author for CODEOWNERS-only commit, got '$last_commit_author'"
-        fi
-    else
-        fail "T20" "Second sync failed: $(cat "$WORK_DIR/sync-core.err")"
-    fi
-    cleanup
-}
-
 test_T26() {
     run_test "T26" "sync-core.sh: pathspec hash change rebuilds pre-bootstrap state"
     setup_repos
@@ -994,6 +892,7 @@ test_T26() {
     # Modify config (add a new exclusion)
     cat > "$CONFIG_FILE" <<EOF
 {
+  "default_include_paths": ["file.txt"],
   "exclude_pathspecs": [":!internal/", ":!.github/", ":!new-exclusion/"],
   "public_repo": {"owner": "test", "name": "test"},
   "sync_branch_prefix": "sync/test"
@@ -1024,55 +923,17 @@ EOF
     cleanup
 }
 
-test_T27() {
-    run_test "T27" "sync-core.sh: ordering — CODEOWNERS check happens before nothing-to-sync exit"
-    setup_repos
-
-    # First sync some code
-    echo "code" > "$PRIVATE/code.txt"
-    commit_as "$PRIVATE" "Dev" "dev@example.com" "Initial code" code.txt
-    run_sync_core || { fail "T27" "First sync failed"; cleanup; return; }
-
-    # Now add CODEOWNERS only (nothing else changes after the first sync's pov)
-    mkdir -p "$PRIVATE/.github"
-    echo "* @team" > "$PRIVATE/.github/CODEOWNERS"
-    cd "$PRIVATE" && git add -A && cd - >/dev/null
-    GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@example.com" \
-    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@example.com" \
-    git -C "$PRIVATE" commit -m "CODEOWNERS only" --quiet
-
-    if run_sync_core; then
-        # Should have created a sync branch with CODEOWNERS even though no code changed
-        if git -C "$PUBLIC" show "$SYNC_BRANCH:.github/CODEOWNERS" >/dev/null 2>&1; then
-            pass "T27"
-        else
-            fail "T27" "CODEOWNERS not synced when only CODEOWNERS changed"
-        fi
-    else
-        local exit_code=$?
-        if [[ $exit_code -eq 2 ]]; then
-            fail "T27" "Pipeline exited 'nothing to sync' instead of syncing CODEOWNERS"
-        else
-            fail "T27" "Sync failed (exit=$exit_code): $(cat "$WORK_DIR/sync-core.err")"
-        fi
-    fi
-    cleanup
-}
-
 # T28 — Regression for the fast-export refspec gotcha.
 # Reproduces CI conditions: SOURCE_REF set to a non-main ref (HEAD detached at
 # the tip of a feature branch). With the old code, fast-export emitted
 # `commit refs/heads/<feature-branch>` (not refs/heads/main), so
 # --refspec=<src>:refs/heads/main didn't match, the filter's ref rewrite
 # didn't match either, and fast-import created refs/heads/<feature-branch>
-# in the public repo instead of refs/heads/$SYNC_BRANCH. apply_codeowners
-# then fell back to creating the sync branch from public/main and amending
-# the tip — producing a branch with NO imported commits.
+# in the public repo instead of refs/heads/$SYNC_BRANCH, leaving the expected
+# sync branch without the imported commits.
 #
-# This test would have failed loudly with the old code: the sync branch's
-# commit count would have been 1 (just the CODEOWNERS amend on top of public
-# main), authors would have been only the bot, and the sync branch's parent
-# chain would NOT include any of the private-repo authors.
+# This test verifies that the expected sync branch contains the imported
+# commits, authors, and files.
 test_T28() {
     run_test "T28" "sync-core.sh: SOURCE_REF=detached HEAD imports commits onto sync branch (refspec gotcha regression)"
     setup_repos
@@ -1123,8 +984,7 @@ test_T28() {
     fi
 
     # 3) The 3 author names must all appear in the sync branch's history.
-    #    With the old code, none of them would — the amend commit's only
-    #    author was the bot.
+    #    With the old code, none appeared on the expected sync branch.
     local authors
     authors=$(git -C "$PUBLIC" log "$SYNC_BRANCH" --format='%an' 2>/dev/null | sort -u)
     local missing=()
@@ -1154,6 +1014,7 @@ write_graft_sync_config() {
     CONFIG_FILE="$WORK_DIR/sync-config.json"
     cat > "$CONFIG_FILE" <<'EOF'
 {
+  "default_include_paths": ["infrastructure/", "samples/"],
   "exclude_pathspecs": [":!internal/", ":!docs/", ":!.azure-pipelines/", ":!.github/", ":!CONTRIBUTING.md", ":!README.md"],
   "public_repo": {"owner": "test", "name": "test"},
   "sync_branch_prefix": "sync/test"
@@ -1170,6 +1031,8 @@ run_sync_core_for_graft() {
         CONFIG_FILE="$CONFIG_FILE" \
         MAILMAP_FILE="$MAILMAP" \
         SOURCE_REF="refs/heads/main" \
+        SYNC_ADDITIONAL_PATHS="${SYNC_ADDITIONAL_PATHS:-}" \
+        SYNC_BLOCKED_PATHS="${SYNC_BLOCKED_PATHS:-}" \
         DRY_RUN=1 \
         bash "$SYNC_SCRIPT" 2>"$WORK_DIR/sync-core.err"
 }
@@ -1377,91 +1240,6 @@ test_T56() {
     cleanup
 }
 
-
-# T57 — Missing-on-public CODEOWNERS is recoverable.
-# Production scenario: a previous sync wiped public's .github/CODEOWNERS but
-# private still has it. Because sync-core's codeowners-sync step amends
-# CODEOWNERS into the imported commit on every run, the seed primitive can
-# safely treat "private has CODEOWNERS, public is missing" as recoverable
-# rather than aborting. This is a hard-fail relaxation: differing blobs
-# (T58) still abort, and matching blobs (T51) still seed cleanly.
-test_T57() {
-    run_test "T57" "seed-marks-from-public: missing-on-public CODEOWNERS is tolerated and seeds marks"
-    setup_public_with_extras
-    write_graft_sync_config
-
-    # Add CODEOWNERS to PRIVATE only; leave it on PUBLIC so we can remove it
-    # cleanly via a public-side commit (mirrors the production wipe pattern).
-    mkdir -p "$PRIVATE/.github"
-    echo "* @private-team" > "$PRIVATE/.github/CODEOWNERS"
-    commit_as "$PRIVATE" "Private Dev" "private@example.com" "Add CODEOWNERS in private" .github/CODEOWNERS
-
-    cd "$PUBLIC" && git rm --quiet .github/CODEOWNERS && cd - >/dev/null
-    env \
-        GIT_AUTHOR_NAME="Public Dev" \
-        GIT_AUTHOR_EMAIL="public@example.com" \
-        GIT_COMMITTER_NAME="Public Dev" \
-        GIT_COMMITTER_EMAIL="public@example.com" \
-        git -C "$PUBLIC" commit -m "Wipe CODEOWNERS (simulates degraded public state)" --quiet
-
-    local private_sha public_sha
-    private_sha=$(git -C "$PRIVATE" rev-parse HEAD)
-    public_sha=$(git -C "$PUBLIC" rev-parse HEAD)
-
-    if ! run_seed_marks "$private_sha" "$public_sha"; then
-        fail "T57" "Expected seed-marks to succeed when public is missing CODEOWNERS: $(cat "$WORK_DIR/seed.err")"
-        cleanup; return
-    fi
-
-    # private.marks is multi-line (one mark per ancestor + seed at :1 on the
-    # last line). public.marks mirrors private.marks, all entries pointing to
-    # the public seed SHA.
-    if ! grep -qFx ":1 $private_sha" "$MARKS_DIR/private.marks" \
-        || ! grep -qFx ":1 $public_sha" "$MARKS_DIR/public.marks"; then
-        fail "T57" "Expected paired marks to be synthesized for the seed pair"
-        cleanup; return
-    fi
-
-    if ! grep -q "CODEOWNERS" "$WORK_DIR/seed.err"; then
-        fail "T57" "Expected a warning mentioning CODEOWNERS when relaxing the check"
-        cleanup; return
-    fi
-
-    pass "T57"
-    cleanup
-}
-
-# T58 — Differing CODEOWNERS blobs still hard-fail.
-# Guards the relaxation in T57: the seed primitive must not silently accept
-# real divergence between private and public CODEOWNERS — only the
-# missing-on-public case is tolerated (because the overlay restores it).
-test_T58() {
-    run_test "T58" "seed-marks-from-public: differing CODEOWNERS blobs still hard-fail"
-    setup_public_with_extras
-    write_graft_sync_config
-
-    mkdir -p "$PRIVATE/.github"
-    echo "* @private-team" > "$PRIVATE/.github/CODEOWNERS"
-    commit_as "$PRIVATE" "Private Dev" "private@example.com" "Add CODEOWNERS in private" .github/CODEOWNERS
-
-    # Public already has '* @public-team' from setup_public_with_extras → blobs differ.
-    local private_sha public_sha
-    private_sha=$(git -C "$PRIVATE" rev-parse HEAD)
-    public_sha=$(git -C "$PUBLIC" rev-parse HEAD)
-
-    if run_seed_marks "$private_sha" "$public_sha"; then
-        fail "T58" "Expected seed-marks to fail when CODEOWNERS blobs differ"
-        cleanup; return
-    fi
-
-    if [[ "$(marks_dir_entry_count)" != "0" ]]; then
-        fail "T58" "Differing CODEOWNERS wrote files to marks-dir"
-        cleanup; return
-    fi
-
-    pass "T58"
-    cleanup
-}
 
 # T59 — Rebase-merge SHA-rewrite recovery (production failure on 2026-05-08).
 #
@@ -1857,9 +1635,8 @@ test_T63() {
         cleanup; return
     fi
 
-    # Add an excluded-paths-only commit. With the default test config
-    # (:!internal/ :!.github/ :!public-overlay/), a change to internal/ is
-    # filtered out, so the sync is a no-op from public's perspective.
+    # Add an excluded-paths-only commit. A change to internal/ is filtered
+    # out, so the sync is a no-op from public's perspective.
     mkdir -p "$PRIVATE/internal"
     echo "secret" > "$PRIVATE/internal/notes.txt"
     commit_as "$PRIVATE" "Dev" "dev@example.com" "Internal notes" internal/notes.txt
@@ -1904,6 +1681,14 @@ setup_gh_mock() {
     cat > "$WORK_DIR/gh-script"
     : > "$WORK_DIR/gh-calls.log"
     echo 0 > "$WORK_DIR/gh-view-counter"
+    echo '{"default_include_paths":["infrastructure/","samples/"]}' > "$WORK_DIR/sync-config.json"
+    cat > "$WORK_DIR/scope-assert.sh" <<'MOCK'
+#!/usr/bin/env bash
+echo "$@" >> "$MOCK_WORK_DIR/scope-calls.log"
+exit "${MOCK_SCOPE_EXIT:-0}"
+MOCK
+    chmod +x "$WORK_DIR/scope-assert.sh"
+    : > "$WORK_DIR/scope-calls.log"
 
     cat > "$WORK_DIR/bin/gh" <<'MOCK'
 #!/usr/bin/env bash
@@ -1935,6 +1720,26 @@ case "$1 $2" in
 esac
 MOCK
     chmod +x "$WORK_DIR/bin/gh"
+
+    cat > "$WORK_DIR/bin/git" <<'MOCK'
+#!/usr/bin/env bash
+echo "$@" >> "$MOCK_WORK_DIR/git-calls.log"
+if [[ "$*" == *" fetch "* ]]; then
+    exit 0
+fi
+if [[ "$*" == *"rev-parse refs/remotes/origin/main"* ]]; then
+    echo "${MOCK_FETCHED_BASE:-3333333333333333333333333333333333333333}"
+    exit 0
+fi
+if [[ "$*" == *" rev-parse "* ]]; then
+    echo "${MOCK_FETCHED_HEAD:-1111111111111111111111111111111111111111}"
+    exit 0
+fi
+echo "MOCK git: unhandled args: $*" >&2
+exit 99
+MOCK
+    chmod +x "$WORK_DIR/bin/git"
+    : > "$WORK_DIR/git-calls.log"
 }
 
 run_wait_and_merge() {
@@ -1944,6 +1749,13 @@ run_wait_and_merge() {
     set +e
     PATH="$WORK_DIR/bin:$PATH" \
         MOCK_WORK_DIR="$WORK_DIR" \
+        MOCK_SCOPE_EXIT="${MOCK_SCOPE_EXIT:-0}" \
+        MOCK_FETCHED_HEAD="${MOCK_FETCHED_HEAD:-1111111111111111111111111111111111111111}" \
+        MOCK_FETCHED_BASE="${MOCK_FETCHED_BASE:-3333333333333333333333333333333333333333}" \
+        SYNC_SCOPE_ASSERT_SCRIPT="$WORK_DIR/scope-assert.sh" \
+        SYNC_SCOPE_PUBLIC_REPO="$WORK_DIR" \
+        SYNC_SCOPE_CONFIG="$WORK_DIR/sync-config.json" \
+        SYNC_BRANCH="sync/test" \
         MERGE_POLL_INTERVAL=1 \
         MERGE_POLL_TIMEOUT="${WAIT_TIMEOUT:-10}" \
         GH_TOKEN="fake-token" \
@@ -1962,7 +1774,7 @@ test_T29() {
     run_test "T29" "wait-and-merge.sh: mergeable with no pending checks → calls gh pr merge --rebase"
 
     setup_gh_mock <<'EOF'
-{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[]}
+{"baseRefName":"main","baseRefOid":"3333333333333333333333333333333333333333","headRefOid":"1111111111111111111111111111111111111111","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[]}
 EOF
 
     run_wait_and_merge
@@ -1973,8 +1785,8 @@ EOF
     fi
 
     # Must have called `pr merge` exactly once with --rebase, no --auto, no --admin
-    if ! grep -q "^pr merge .* --rebase$" "$WORK_DIR/gh-calls.log"; then
-        fail "T29" "Expected 'pr merge ... --rebase' call. Calls: $(cat "$WORK_DIR/gh-calls.log")"
+    if ! grep -q "^pr merge .* --rebase --match-head-commit 1111111111111111111111111111111111111111$" "$WORK_DIR/gh-calls.log"; then
+        fail "T29" "Expected a rebase merge pinned to the guarded head. Calls: $(cat "$WORK_DIR/gh-calls.log")"
         cleanup_gh_mock; return
     fi
     if grep -q -- "--auto" "$WORK_DIR/gh-calls.log"; then
@@ -2042,6 +1854,94 @@ EOF
     fi
 
     pass "T31"
+    cleanup_gh_mock
+}
+
+test_T80() {
+    run_test "T80" "wait-and-merge.sh: final scope failure prevents merge"
+
+    setup_gh_mock <<'EOF'
+{"baseRefName":"main","baseRefOid":"3333333333333333333333333333333333333333","headRefOid":"1111111111111111111111111111111111111111","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[]}
+EOF
+
+    MOCK_SCOPE_EXIT=1 run_wait_and_merge
+
+    if [[ "$WAIT_EXIT_CODE" -eq 0 ]]; then
+        fail "T80" "Script exited 0 after final scope assertion failed."
+    elif [[ ! -s "$WORK_DIR/scope-calls.log" ]]; then
+        fail "T80" "Final scope assertion was not invoked."
+    elif grep -q "^pr merge " "$WORK_DIR/gh-calls.log"; then
+        fail "T80" "Script called gh pr merge after final scope assertion failed."
+    else
+        pass "T80"
+    fi
+    cleanup_gh_mock
+}
+
+test_T85() {
+    run_test "T85" "wait-and-merge.sh: fetched head mismatch prevents guard and merge"
+
+    setup_gh_mock <<'EOF'
+{"headRefOid":"1111111111111111111111111111111111111111","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[]}
+EOF
+
+    MOCK_FETCHED_HEAD="2222222222222222222222222222222222222222" run_wait_and_merge
+
+    if [[ "$WAIT_EXIT_CODE" -eq 0 ]]; then
+        fail "T85" "Script exited 0 after the fetched branch diverged from the PR head."
+    elif [[ -s "$WORK_DIR/scope-calls.log" ]]; then
+        fail "T85" "Scope guard ran against a branch that did not match the PR head."
+    elif grep -q "^pr merge " "$WORK_DIR/gh-calls.log"; then
+        fail "T85" "Script merged after the fetched branch diverged from the PR head."
+    else
+        pass "T85"
+    fi
+    cleanup_gh_mock
+}
+
+test_T89() {
+    run_test "T89" "wait-and-merge.sh: base movement after guard prevents merge"
+
+    setup_gh_mock <<'EOF'
+{"baseRefName":"main","baseRefOid":"3333333333333333333333333333333333333333","headRefOid":"1111111111111111111111111111111111111111","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[]}
+{"baseRefName":"main","baseRefOid":"4444444444444444444444444444444444444444","headRefOid":"1111111111111111111111111111111111111111"}
+EOF
+
+    run_wait_and_merge
+
+    if [[ "$WAIT_EXIT_CODE" -eq 0 ]]; then
+        fail "T89" "Script exited 0 after public main moved following the guard."
+    elif [[ ! -s "$WORK_DIR/scope-calls.log" ]]; then
+        fail "T89" "Scope guard did not run before the simulated base movement."
+    elif grep -q "^pr merge " "$WORK_DIR/gh-calls.log"; then
+        fail "T89" "Script merged after public main moved following the guard."
+    else
+        pass "T89"
+    fi
+    cleanup_gh_mock
+}
+
+test_T90() {
+    run_test "T90" "wait-and-merge.sh: base branch change after guard prevents merge"
+
+    setup_gh_mock <<'EOF'
+{"baseRefName":"main","baseRefOid":"3333333333333333333333333333333333333333","headRefOid":"1111111111111111111111111111111111111111","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[]}
+{"baseRefName":"release","baseRefOid":"3333333333333333333333333333333333333333","headRefOid":"1111111111111111111111111111111111111111"}
+EOF
+
+    run_wait_and_merge
+
+    if [[ "$WAIT_EXIT_CODE" -eq 0 ]]; then
+        fail "T90" "Script exited 0 after the PR base branch changed."
+    elif [[ ! -s "$WORK_DIR/scope-calls.log" ]]; then
+        fail "T90" "Scope guard did not run before the simulated base branch change."
+    elif grep -q "^pr merge " "$WORK_DIR/gh-calls.log"; then
+        fail "T90" "Script merged after the PR base branch changed."
+    elif ! grep -q "refusing to merge anywhere except main" "$WORK_DIR/wait.out" "$WORK_DIR/wait.err"; then
+        fail "T90" "Base branch failure was not clearly reported."
+    else
+        pass "T90"
+    fi
     cleanup_gh_mock
 }
 
@@ -2268,272 +2168,19 @@ test_T47() {
 }
 
 
-# ── Public-overlay mechanism (T_overlay_*) ─────────────────────────────────────
-#
-# Validates the post-import public-overlay/ step in sync-core.sh.
-# Files placed at private:public-overlay/<path> must land on public:<path>
-# after fast-import, surviving fresh-marks rebuilds. The literal
-# public-overlay/ directory itself must NEVER appear on public.
-# See ADO 5255033, Feature 5255019.
-
-test_T_overlay_applied() {
-    run_test "T_overlay_applied" "Overlay files copied to public root, not under public-overlay/"
-    setup_repos
-
-    echo "code" > "$PRIVATE/code.txt"
-    commit_as "$PRIVATE" "Dev" "dev@example.com" "Add code" code.txt
-
-    mkdir -p "$PRIVATE/public-overlay/.github/workflows"
-    echo "# Public Readme" > "$PRIVATE/public-overlay/README.md"
-    echo "name: ci" > "$PRIVATE/public-overlay/.github/workflows/foo.yml"
-    cd "$PRIVATE" && git add -A && cd - >/dev/null
-    GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@example.com" \
-    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@example.com" \
-    git -C "$PRIVATE" commit -m "Add overlay" --quiet
-
-    if ! run_sync_core; then
-        fail "T_overlay_applied" "sync-core.sh failed: $(cat "$WORK_DIR/sync-core.err")"
-        cleanup; return
-    fi
-
-    local readme workflow has_overlay_dir
-    readme=$(git -C "$PUBLIC" show "$SYNC_BRANCH:README.md" 2>/dev/null || echo "MISSING")
-    workflow=$(git -C "$PUBLIC" show "$SYNC_BRANCH:.github/workflows/foo.yml" 2>/dev/null || echo "MISSING")
-    has_overlay_dir=$(git -C "$PUBLIC" ls-tree -r --name-only "$SYNC_BRANCH" 2>/dev/null | grep -c "^public-overlay/" || true)
-    has_overlay_dir="${has_overlay_dir:-0}"
-
-    if [[ "$readme" == "# Public Readme" && "$workflow" == "name: ci" && "$has_overlay_dir" == "0" ]]; then
-        pass "T_overlay_applied"
-    else
-        fail "T_overlay_applied" "readme='$readme' workflow='$workflow' has_overlay_dir=$has_overlay_dir"
-    fi
-    cleanup
-}
-
-test_T_overlay_only_change() {
-    run_test "T_overlay_only_change" "Overlay-only change produces a public commit even with no private code commits"
-    setup_repos
-
-    # First sync: bring some code over, no overlay yet.
-    echo "code" > "$PRIVATE/code.txt"
-    commit_as "$PRIVATE" "Dev" "dev@example.com" "Add code" code.txt
-    run_sync_core || { fail "T_overlay_only_change" "First sync failed: $(cat "$WORK_DIR/sync-core.err")"; cleanup; return; }
-
-    local first_count
-    first_count=$(git -C "$PUBLIC" rev-list --count "$SYNC_BRANCH" 2>/dev/null || echo 0)
-
-    # Second sync: ONLY add an overlay file in private. No code change.
-    mkdir -p "$PRIVATE/public-overlay"
-    echo "# Readme" > "$PRIVATE/public-overlay/README.md"
-    cd "$PRIVATE" && git add -A && cd - >/dev/null
-    GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@example.com" \
-    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@example.com" \
-    git -C "$PRIVATE" commit -m "Overlay only" --quiet
-
-    if ! run_sync_core; then
-        fail "T_overlay_only_change" "Second sync failed: $(cat "$WORK_DIR/sync-core.err")"
-        cleanup; return
-    fi
-
-    local second_count readme last_author
-    second_count=$(git -C "$PUBLIC" rev-list --count "$SYNC_BRANCH" 2>/dev/null || echo 0)
-    readme=$(git -C "$PUBLIC" show "$SYNC_BRANCH:README.md" 2>/dev/null || echo "MISSING")
-    last_author=$(git -C "$PUBLIC" log -1 --format="%an" "$SYNC_BRANCH" 2>/dev/null)
-
-    if [[ "$second_count" -gt "$first_count" \
-        && "$readme" == "# Readme" \
-        && ( "$last_author" == *"sync"* || "$last_author" == *"bot"* ) ]]; then
-        pass "T_overlay_only_change"
-    else
-        fail "T_overlay_only_change" "first=$first_count second=$second_count readme='$readme' author='$last_author'"
-    fi
-    cleanup
-}
-
-test_T_overlay_nested_path() {
-    run_test "T_overlay_nested_path" "Nested overlay path lands at correct nested public path"
-    setup_repos
-
-    echo "code" > "$PRIVATE/code.txt"
-    commit_as "$PRIVATE" "Dev" "dev@example.com" "Add code" code.txt
-
-    mkdir -p "$PRIVATE/public-overlay/.github/workflows"
-    echo "name: foo" > "$PRIVATE/public-overlay/.github/workflows/foo.yml"
-    cd "$PRIVATE" && git add -A && cd - >/dev/null
-    GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@example.com" \
-    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@example.com" \
-    git -C "$PRIVATE" commit -m "Add nested overlay" --quiet
-
-    if ! run_sync_core; then
-        fail "T_overlay_nested_path" "sync-core.sh failed: $(cat "$WORK_DIR/sync-core.err")"
-        cleanup; return
-    fi
-
-    local content
-    content=$(git -C "$PUBLIC" show "$SYNC_BRANCH:.github/workflows/foo.yml" 2>/dev/null || echo "MISSING")
-    if [[ "$content" == "name: foo" ]]; then
-        pass "T_overlay_nested_path"
-    else
-        fail "T_overlay_nested_path" "Expected nested file at .github/workflows/foo.yml, got '$content'"
-    fi
-    cleanup
-}
-
-test_T_overlay_dir_excluded() {
-    run_test "T_overlay_dir_excluded" "public-overlay/ directory does NOT appear in public tree"
-    setup_repos
-
-    echo "code" > "$PRIVATE/code.txt"
-    commit_as "$PRIVATE" "Dev" "dev@example.com" "Add code" code.txt
-
-    mkdir -p "$PRIVATE/public-overlay"
-    echo "# README" > "$PRIVATE/public-overlay/README.md"
-    cd "$PRIVATE" && git add -A && cd - >/dev/null
-    GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@example.com" \
-    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@example.com" \
-    git -C "$PRIVATE" commit -m "Add overlay" --quiet
-
-    if ! run_sync_core; then
-        fail "T_overlay_dir_excluded" "sync-core.sh failed: $(cat "$WORK_DIR/sync-core.err")"
-        cleanup; return
-    fi
-
-    local overlay_present
-    overlay_present=$(git -C "$PUBLIC" ls-tree -r --name-only "$SYNC_BRANCH" 2>/dev/null | grep -c "^public-overlay/" || true)
-    overlay_present="${overlay_present:-0}"
-    if [[ "$overlay_present" == "0" ]]; then
-        pass "T_overlay_dir_excluded"
-    else
-        fail "T_overlay_dir_excluded" "public-overlay/ leaked into public tree ($overlay_present matches)"
-    fi
-    cleanup
-}
-
-test_T_overlay_codeowners_coexist() {
-    run_test "T_overlay_codeowners_coexist" "CODEOWNERS + overlay change in same run both land correctly"
-    setup_repos
-
-    mkdir -p "$PRIVATE/.github" "$PRIVATE/public-overlay"
-    echo "* @team" > "$PRIVATE/.github/CODEOWNERS"
-    echo "# Readme" > "$PRIVATE/public-overlay/README.md"
-    echo "code" > "$PRIVATE/code.txt"
-    cd "$PRIVATE" && git add -A && cd - >/dev/null
-    GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@example.com" \
-    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@example.com" \
-    git -C "$PRIVATE" commit -m "Add code, codeowners, overlay" --quiet
-
-    if ! run_sync_core; then
-        fail "T_overlay_codeowners_coexist" "sync-core.sh failed: $(cat "$WORK_DIR/sync-core.err")"
-        cleanup; return
-    fi
-
-    local code readme codeowners
-    code=$(git -C "$PUBLIC" show "$SYNC_BRANCH:code.txt" 2>/dev/null || echo "MISSING")
-    readme=$(git -C "$PUBLIC" show "$SYNC_BRANCH:README.md" 2>/dev/null || echo "MISSING")
-    codeowners=$(git -C "$PUBLIC" show "$SYNC_BRANCH:.github/CODEOWNERS" 2>/dev/null || echo "MISSING")
-
-    if [[ "$code" == "code" && "$readme" == "# Readme" && "$codeowners" == "* @team" ]]; then
-        pass "T_overlay_codeowners_coexist"
-    else
-        fail "T_overlay_codeowners_coexist" "code='$code' readme='$readme' codeowners='$codeowners'"
-    fi
-    cleanup
-}
-
-test_T_overlay_restored_when_unchanged_with_imports() {
-    run_test "T_overlay_restored_when_unchanged_with_imports" "Unchanged overlay and CODEOWNERS are restored after imports"
-    setup_repos
-
-    mkdir -p "$PRIVATE/.github" \
-        "$PRIVATE/public-overlay/.github/scripts" \
-        "$PRIVATE/public-overlay/.github/workflows"
-
-    echo "* @team" > "$PRIVATE/.github/CODEOWNERS"
-    echo "# Public README" > "$PRIVATE/README.md"
-    echo "# Public CONTRIBUTING" > "$PRIVATE/CONTRIBUTING.md"
-    echo "# Public README" > "$PRIVATE/public-overlay/README.md"
-    echo "# Public CONTRIBUTING" > "$PRIVATE/public-overlay/CONTRIBUTING.md"
-    echo "Public copilot instructions" > "$PRIVATE/public-overlay/.github/copilot-instructions.md"
-    echo "print('filesize summary')" > "$PRIVATE/public-overlay/.github/scripts/commit-filesize-diff-summary.py"
-    echo "name: pre-commit" > "$PRIVATE/public-overlay/.github/workflows/pre-commit.yml"
-
-    cd "$PRIVATE" && git add -A && cd - >/dev/null
-    GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@example.com" \
-    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@example.com" \
-    git -C "$PRIVATE" commit -m "Add public-owned files" --quiet
-
-    run_sync_core || {
-        fail "T_overlay_restored_when_unchanged_with_imports" "bootstrap sync failed: $(cat "$WORK_DIR/sync-core.err")"
-        cleanup; return
-    }
-    git -C "$PUBLIC" update-ref refs/heads/main "$SYNC_BRANCH"
-    git -C "$PUBLIC" checkout main --quiet
-
-    mkdir -p "$PRIVATE/samples/python/steady-state"
-    echo "sample change" > "$PRIVATE/samples/python/steady-state/sample.txt"
-    cd "$PRIVATE" && git add -A && cd - >/dev/null
-    GIT_AUTHOR_NAME="Dev" GIT_AUTHOR_EMAIL="dev@example.com" \
-    GIT_COMMITTER_NAME="Dev" GIT_COMMITTER_EMAIL="dev@example.com" \
-    git -C "$PRIVATE" commit -m "Add sample change" --quiet
-
-    if ! run_sync_core; then
-        fail "T_overlay_restored_when_unchanged_with_imports" "sync-core.sh failed: $(cat "$WORK_DIR/sync-core.err")"
-        cleanup; return
-    fi
-
-    local sample readme contributing codeowners copilot script workflow overlay_dir
-    sample=$(git -C "$PUBLIC" show "$SYNC_BRANCH:samples/python/steady-state/sample.txt" 2>/dev/null || echo "MISSING")
-    readme=$(git -C "$PUBLIC" show "$SYNC_BRANCH:README.md" 2>/dev/null || echo "MISSING")
-    contributing=$(git -C "$PUBLIC" show "$SYNC_BRANCH:CONTRIBUTING.md" 2>/dev/null || echo "MISSING")
-    codeowners=$(git -C "$PUBLIC" show "$SYNC_BRANCH:.github/CODEOWNERS" 2>/dev/null || echo "MISSING")
-    copilot=$(git -C "$PUBLIC" show "$SYNC_BRANCH:.github/copilot-instructions.md" 2>/dev/null || echo "MISSING")
-    script=$(git -C "$PUBLIC" show "$SYNC_BRANCH:.github/scripts/commit-filesize-diff-summary.py" 2>/dev/null || echo "MISSING")
-    workflow=$(git -C "$PUBLIC" show "$SYNC_BRANCH:.github/workflows/pre-commit.yml" 2>/dev/null || echo "MISSING")
-    overlay_dir=$(git -C "$PUBLIC" ls-tree -r --name-only "$SYNC_BRANCH" 2>/dev/null | grep -c "^public-overlay/" || true)
-    overlay_dir="${overlay_dir:-0}"
-
-    if [[ "$sample" == "sample change" \
-        && "$readme" == "# Public README" \
-        && "$contributing" == "# Public CONTRIBUTING" \
-        && "$codeowners" == "* @team" \
-        && "$copilot" == "Public copilot instructions" \
-        && "$script" == "print('filesize summary')" \
-        && "$workflow" == "name: pre-commit" \
-        && "$overlay_dir" == "0" ]]; then
-        pass "T_overlay_restored_when_unchanged_with_imports"
-    else
-        fail "T_overlay_restored_when_unchanged_with_imports" "sample='$sample' readme='$readme' contributing='$contributing' codeowners='$codeowners' copilot='$copilot' script='$script' workflow='$workflow' overlay_dir=$overlay_dir"
-    fi
-    cleanup
-}
-
-
 # Run sync-core.sh integration tests
 if [[ -f "$SYNC_SCRIPT" ]]; then
-    test_T18
-    test_T19
-    test_T20
     test_T26
-    test_T27
     test_T28
     test_T37
     test_T51
     test_T52
     test_T53
     test_T56
-    test_T57
-    test_T58
     test_T59
     test_T60
     test_T62
     test_T63
-    test_T_overlay_applied
-    test_T_overlay_only_change
-    test_T_overlay_nested_path
-    test_T_overlay_dir_excluded
-    test_T_overlay_codeowners_coexist
-    test_T_overlay_restored_when_unchanged_with_imports
-
     # T39-T47 pin the Phase D2 sync-core block-list contract.
     # Enabled by default; set SYNC_BLOCKLIST_TESTS_ENABLED=0 for legacy environments.
     # See docs/validation-story-decisions.md and ADO 5237807.
@@ -2561,6 +2208,10 @@ if [[ -f "$WAIT_AND_MERGE_SCRIPT" ]]; then
     test_T29
     test_T30
     test_T31
+    test_T80
+    test_T85
+    test_T89
+    test_T90
 else
     echo ""
     echo "⚠️  Skipping wait-and-merge.sh tests (script not found at $WAIT_AND_MERGE_SCRIPT)"
@@ -2577,8 +2228,23 @@ fi
 VERIFY_SYNC_SCRIPT="$REPO_ROOT/.github/scripts/verify-sync.sh"
 
 write_default_config() {
-    cat > "$WORK_DIR/sync-config.json" <<'EOF'
+    local include_json
+    include_json=$(python3 - "$PRIVATE" <<'PY'
+import json
+import os
+import sys
+
+repo = sys.argv[1]
+paths = ["infrastructure/", "samples/"]
+for name in os.listdir(repo):
+    if name not in {".git", ".github", "internal", "README.md", "CONTRIBUTING.md"}:
+        paths.append(name + "/" if os.path.isdir(os.path.join(repo, name)) else name)
+print(json.dumps(sorted(paths)))
+PY
+)
+    cat > "$WORK_DIR/sync-config.json" <<EOF
 {
+  "default_include_paths": $include_json,
   "exclude_pathspecs": [":!internal/", ":!.github/"],
   "public_repo": {"owner": "x", "name": "y"},
   "sync_branch_prefix": "sync"
@@ -2639,8 +2305,9 @@ test_T33() {
     fi
 
     # Plant a rogue file directly in public — simulates manual edit / dropped delete
-    echo "rogue" > "$PUBLIC/rogue.txt"
-    commit_as "$PUBLIC" "Rogue" "rogue@ext.com" "Add rogue" rogue.txt
+    mkdir -p "$PUBLIC/samples"
+    echo "rogue" > "$PUBLIC/samples/rogue.txt"
+    commit_as "$PUBLIC" "Rogue" "rogue@ext.com" "Add rogue" samples/rogue.txt
 
     run_verify_sync
     if [[ $VERIFY_EXIT_CODE -ne 0 ]]; then
@@ -2651,8 +2318,8 @@ test_T33() {
         fail "T33" "Expected drift=true. Output: $(cat "$WORK_DIR/verify.out")"
         cleanup; return
     fi
-    if ! grep -qE '^\*deleting\srogue\.txt$' /tmp/drift-files.txt; then
-        fail "T33" "Expected '*deleting rogue.txt' in drift report. Got: $(cat /tmp/drift-files.txt)"
+    if ! grep -qE '^\*deleting\ssamples/rogue\.txt$' /tmp/drift-files.txt; then
+        fail "T33" "Expected '*deleting samples/rogue.txt' in drift report. Got: $(cat /tmp/drift-files.txt)"
         cleanup; return
     fi
 
@@ -2991,469 +2658,6 @@ else
     echo "⚠️  Skipping verify-sync.sh tests (script not found at $VERIFY_SYNC_SCRIPT)"
 fi
 
-# ── Protected-paths guard tests (T64–T68) ───────────────────────────────────
-#
-# The guard runs in sync-core.sh main() after the sync branch is fully built,
-# and refuses to push if any path in sync-config.json's `protected_paths` would
-# be deleted or modified on public main. These tests exercise the guard
-# function directly by sourcing sync-core.sh with the trailing `main "$@"`
-# stripped so it doesn't auto-run; this is the only place in the suite that
-# imports script internals, so localizing the technique here is OK.
-
-# Source sync-core.sh's function definitions WITHOUT auto-running main, then
-# invoke guard_protected_paths in the current shell. Writes stderr to
-# $WORK_DIR/guard.err for assertions.
-run_guard_only() {
-    local stripped="$WORK_DIR/sync-core-stripped.sh"
-    grep -v '^main "\$@"$' "$SYNC_SCRIPT" > "$stripped"
-    PUBLIC_REPO="$PUBLIC" \
-    CONFIG_FILE="$CONFIG_FILE" \
-    SYNC_BRANCH="$SYNC_BRANCH" \
-    bash -c "set -uo pipefail; source '$stripped'; guard_protected_paths" \
-        2>"$WORK_DIR/guard.err"
-}
-
-# Write a sync-config.json that includes a protected_paths array.
-# Use the args (or sensible default) for the path list.
-write_protected_config() {
-    SYNC_BRANCH="${SYNC_BRANCH:-sync/test-$$-${TESTS_RUN}}"
-    CONFIG_FILE="$WORK_DIR/sync-config.json"
-    local paths_json
-    if [[ $# -eq 0 ]]; then
-        paths_json='[".github/workflows/redirect-pull-requests.yml"]'
-    else
-        paths_json="["
-        local first=1
-        for p in "$@"; do
-            if [[ $first -eq 1 ]]; then
-                paths_json+="\"$p\""
-                first=0
-            else
-                paths_json+=",\"$p\""
-            fi
-        done
-        paths_json+="]"
-    fi
-    cat > "$CONFIG_FILE" <<EOF
-{
-  "exclude_pathspecs": [":!internal/", ":!.github/", ":!public-overlay/"],
-  "protected_paths": $paths_json,
-  "public_repo": {"owner": "test", "name": "test"},
-  "sync_branch_prefix": "sync/test"
-}
-EOF
-}
-
-# Helper: commit a workflow file directly on PUBLIC main.
-# Mimics a human PR that landed a public-only workflow.
-commit_workflow_on_public_main() {
-    local path="$1"
-    local content="$2"
-
-    git -C "$PUBLIC" checkout -B main --quiet 2>/dev/null || \
-        git -C "$PUBLIC" checkout main --quiet
-    mkdir -p "$PUBLIC/$(dirname -- "$path")"
-    printf '%s\n' "$content" > "$PUBLIC/$path"
-    git -C "$PUBLIC" add -- "$path"
-    GIT_AUTHOR_NAME="Human" GIT_AUTHOR_EMAIL="human@example.com" \
-    GIT_COMMITTER_NAME="Human" GIT_COMMITTER_EMAIL="human@example.com" \
-        git -C "$PUBLIC" commit -m "add $path" --quiet
-}
-
-# Helper: create the sync branch in a desired state.
-# Modes:
-#   match    — sync branch matches main exactly (workflow present, same blob)
-#   missing  — sync branch is orphan-like (workflow absent)
-#   stale    — sync branch has workflow at $path but with different content
-make_sync_branch() {
-    local mode="$1"
-    local path="${2:-.github/workflows/redirect-pull-requests.yml}"
-    local stale_content="${3:-stale: true}"
-
-    case "$mode" in
-        match)
-            git -C "$PUBLIC" checkout -B "$SYNC_BRANCH" main --quiet
-            ;;
-        missing)
-            # Orphan branch with no parent, simulating discard-and-full-reexport.
-            git -C "$PUBLIC" checkout --orphan "$SYNC_BRANCH" --quiet
-            git -C "$PUBLIC" rm -rf --quiet . 2>/dev/null || true
-            echo "imported" > "$PUBLIC/dummy.txt"
-            git -C "$PUBLIC" add dummy.txt
-            GIT_AUTHOR_NAME="Bot" GIT_AUTHOR_EMAIL="bot@example.com" \
-            GIT_COMMITTER_NAME="Bot" GIT_COMMITTER_EMAIL="bot@example.com" \
-                git -C "$PUBLIC" commit -m "orphan import" --quiet
-            ;;
-        stale)
-            git -C "$PUBLIC" checkout -B "$SYNC_BRANCH" main --quiet
-            mkdir -p "$PUBLIC/$(dirname -- "$path")"
-            printf '%s\n' "$stale_content" > "$PUBLIC/$path"
-            git -C "$PUBLIC" add -- "$path"
-            GIT_AUTHOR_NAME="Bot" GIT_AUTHOR_EMAIL="bot@example.com" \
-            GIT_COMMITTER_NAME="Bot" GIT_COMMITTER_EMAIL="bot@example.com" \
-                git -C "$PUBLIC" commit -m "drift $path" --quiet
-            ;;
-        *)
-            echo "make_sync_branch: unknown mode '$mode'" >&2
-            return 2
-            ;;
-    esac
-}
-
-# ── Helpers for full-pipeline protected-paths guard tests (T69, T70) ────────
-#
-# T64-T68 above test guard_protected_paths in isolation by synthesizing the
-# sync branch tip with `make_sync_branch`. T69 and T70 instead run the REAL
-# production pipeline (fast-export → filter → fast-import) end-to-end via
-# sync-core.sh and assert on the guard's behavior as a step in that pipeline.
-# This is the only way to exercise the `git fast-export --import-marks` +
-# pathspec interaction that ADO 5347121 hinges on — synthesized branch states
-# can't reproduce it.
-
-# Write a sync-config.json shaped like production: production exclude_pathspecs
-# (so .github/ is excluded from the include-set), plus a single-entry
-# protected_paths so the guard actually fires.
-write_protected_sync_config() {
-    CONFIG_FILE="$WORK_DIR/sync-config.json"
-    cat > "$CONFIG_FILE" <<'EOF'
-{
-  "exclude_pathspecs": [":!internal/", ":!docs/", ":!.azure-pipelines/", ":!.github/", ":!CONTRIBUTING.md", ":!README.md"],
-  "protected_paths": [".github/workflows/redirect-pull-requests.yml"],
-  "public_repo": {"owner": "test", "name": "test"},
-  "sync_branch_prefix": "sync/test"
-}
-EOF
-}
-
-# Fast-forward public main to $SYNC_BRANCH. Simulates the production flow
-# where a sync PR auto-merges into public main between syncs, so the next
-# run's --import-marks anchor points at a previous sync-import commit (which
-# also lacks .github/ — exactly the topology that exposes ADO 5347121).
-merge_sync_branch_to_public_main() {
-    git -C "$PUBLIC" checkout -B main "refs/heads/$SYNC_BRANCH" --quiet
-}
-
-# Commit the protected workflow file directly on public main (without going
-# through the sync pipeline). Models the human PR that restores protected
-# workflows on public after they've been wiped — the prerequisite state for
-# both ADO 5347121 scenarios.
-land_protected_workflow_on_public_main() {
-    local content="${1:-name: redirect}"
-    git -C "$PUBLIC" checkout main --quiet
-    mkdir -p "$PUBLIC/.github/workflows"
-    printf '%s\n' "$content" > "$PUBLIC/.github/workflows/redirect-pull-requests.yml"
-    git -C "$PUBLIC" add -- .github/workflows/redirect-pull-requests.yml
-    GIT_AUTHOR_NAME="Human" GIT_AUTHOR_EMAIL="human@example.com" \
-    GIT_COMMITTER_NAME="Human" GIT_COMMITTER_EMAIL="human@example.com" \
-        git -C "$PUBLIC" commit -m "human PR: restore protected workflow" --quiet
-}
-
-# T64: config has no protected_paths key → guard is a silent no-op.
-test_T64() {
-    run_test "T64" "guard: empty protected_paths config → no-op pass"
-    setup_repos
-    setup_sync_core_env  # default config has no protected_paths
-    # Need a SYNC_BRANCH ref even though guard won't read it.
-    git -C "$PUBLIC" checkout --orphan "$SYNC_BRANCH" --quiet 2>/dev/null || true
-    echo "x" > "$PUBLIC/x.txt"
-    git -C "$PUBLIC" add x.txt
-    GIT_AUTHOR_NAME="Bot" GIT_AUTHOR_EMAIL="bot@example.com" \
-    GIT_COMMITTER_NAME="Bot" GIT_COMMITTER_EMAIL="bot@example.com" \
-        git -C "$PUBLIC" commit -m "init" --quiet 2>/dev/null || true
-
-    if run_guard_only; then
-        pass "T64"
-    else
-        fail "T64" "Guard exited non-zero with empty protected_paths. stderr: $(cat "$WORK_DIR/guard.err")"
-    fi
-    cleanup
-}
-
-# T65: protected path is on PUBLIC main and sync branch matches it → pass.
-test_T65() {
-    run_test "T65" "guard: protected path matches between public main and sync branch → pass"
-    setup_repos
-    write_protected_config ".github/workflows/redirect-pull-requests.yml"
-    commit_workflow_on_public_main ".github/workflows/redirect-pull-requests.yml" "name: redirect"
-    make_sync_branch match
-
-    if ! run_guard_only; then
-        fail "T65" "Guard exited non-zero when sync branch matched public main. stderr: $(cat "$WORK_DIR/guard.err")"
-        cleanup; return
-    fi
-    if ! grep -q "Protected-paths guard passed" "$WORK_DIR/guard.err"; then
-        fail "T65" "Expected pass log, got: $(cat "$WORK_DIR/guard.err")"
-        cleanup; return
-    fi
-    pass "T65"
-    cleanup
-}
-
-# T66: protected path is on PUBLIC main but missing from sync branch → fail.
-# This is the orphan-recovery wipe scenario the guard exists to catch.
-test_T66() {
-    run_test "T66" "guard: protected path on public main but missing from sync branch → fail (deletion)"
-    setup_repos
-    write_protected_config ".github/workflows/redirect-pull-requests.yml"
-    commit_workflow_on_public_main ".github/workflows/redirect-pull-requests.yml" "name: redirect"
-    make_sync_branch missing
-
-    if run_guard_only; then
-        fail "T66" "Guard exited 0 when sync branch was orphaned and missing protected workflow"
-        cleanup; return
-    fi
-    if ! grep -q "MISSING from sync branch" "$WORK_DIR/guard.err"; then
-        fail "T66" "Expected 'MISSING from sync branch' in error. stderr: $(cat "$WORK_DIR/guard.err")"
-        cleanup; return
-    fi
-    if ! grep -q "seed_from_public_sha" "$WORK_DIR/guard.err"; then
-        fail "T66" "Expected recovery-procedure mention. stderr: $(cat "$WORK_DIR/guard.err")"
-        cleanup; return
-    fi
-    pass "T66"
-    cleanup
-}
-
-# T67: protected path content differs between public main and sync branch → fail.
-test_T67() {
-    run_test "T67" "guard: protected path has divergent blob between public main and sync branch → fail (modification)"
-    setup_repos
-    write_protected_config ".github/workflows/redirect-pull-requests.yml"
-    commit_workflow_on_public_main ".github/workflows/redirect-pull-requests.yml" "name: original"
-    make_sync_branch stale ".github/workflows/redirect-pull-requests.yml" "name: tampered"
-
-    if run_guard_only; then
-        fail "T67" "Guard exited 0 when sync branch had divergent blob"
-        cleanup; return
-    fi
-    if ! grep -q "divergent content" "$WORK_DIR/guard.err"; then
-        fail "T67" "Expected 'divergent content' in error. stderr: $(cat "$WORK_DIR/guard.err")"
-        cleanup; return
-    fi
-    pass "T67"
-    cleanup
-}
-
-# T68: protected path is absent from BOTH public main and sync branch → skip
-# silently (the path is "not yet protected" or "intentionally removed").
-test_T68() {
-    run_test "T68" "guard: protected path absent from public main → skip silently"
-    setup_repos
-    write_protected_config ".github/workflows/redirect-pull-requests.yml"
-    # Create public main with some other content, but NOT the protected file.
-    commit_workflow_on_public_main "README.md" "# public"
-    make_sync_branch match  # sync branch = main, also lacks the protected file
-
-    if ! run_guard_only; then
-        fail "T68" "Guard exited non-zero when protected path was absent from both sides. stderr: $(cat "$WORK_DIR/guard.err")"
-        cleanup; return
-    fi
-    if ! grep -q "absent from public main" "$WORK_DIR/guard.err"; then
-        fail "T68" "Expected 'absent from public main' skip log. stderr: $(cat "$WORK_DIR/guard.err")"
-        cleanup; return
-    fi
-    pass "T68"
-    cleanup
-}
-
-# T69 — ADO 5347121 (RED — bug repro).
-#
-# Normal-incremental sync with the protected workflow on public main and
-# private never touching .github/. The sync branch produced by
-# fast-export+pathspec+--import-marks chains off a previous sync-import
-# commit (which also lacks .github/), so a rebase-merge would NOT delete
-# the protected workflow. The guard SHOULD pass.
-#
-# Today it fires "MISSING from sync branch" anyway because the current
-# blob-comparison guard reads `sync_branch_tip:.github/workflows/X`,
-# which is empty (fast-export forces --full-tree under --import-marks +
-# pathspec, so the sync branch tree never contains excluded paths).
-#
-# TODO(ADO 5347121): this test asserts the post-fix invariant and is
-# intentionally RED until guard_protected_paths is replaced with a
-# `git merge-tree`-based check. After the fix lands, this test must
-# turn green without modification.
-test_T69() {
-    run_test "T69" "guard (full pipeline): normal incremental + protected file on public main → should pass [RED until ADO 5347121 fix]"
-    setup_repos
-    write_protected_sync_config
-
-    # First private commit and first sync. No marks yet; fast-export emits
-    # full history; fast-import creates the sync branch from scratch.
-    mkdir -p "$PRIVATE/samples"
-    echo "file1" > "$PRIVATE/samples/file1.txt"
-    commit_as "$PRIVATE" "Private Dev" "private@example.com" \
-        "Add samples/file1.txt" samples/file1.txt
-
-    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-protoincr"
-    if ! run_sync_core_for_graft; then
-        fail "T69" "First sync (no marks) failed: $(cat "$WORK_DIR/sync-core.err")"
-        cleanup; return
-    fi
-    if ! git -C "$PUBLIC" rev-parse --verify "refs/heads/$SYNC_BRANCH" >/dev/null 2>&1; then
-        fail "T69" "First sync did not produce $SYNC_BRANCH"
-        cleanup; return
-    fi
-
-    # Production-equivalent: the sync PR auto-merges into public main, then
-    # a separate human PR lands the protected workflow on main.
-    merge_sync_branch_to_public_main
-    land_protected_workflow_on_public_main "name: redirect"
-
-    # Sanity: public main HAS the protected workflow now.
-    if ! git -C "$PUBLIC" rev-parse --verify "main:.github/workflows/redirect-pull-requests.yml" >/dev/null 2>&1; then
-        fail "T69" "Test setup error: protected workflow not on public main after land step"
-        cleanup; return
-    fi
-    local main_blob_before
-    main_blob_before=$(git -C "$PUBLIC" rev-parse "main:.github/workflows/redirect-pull-requests.yml")
-
-    # Second private commit, still only touching samples/. Second sync now
-    # runs with --import-marks active — the topology ADO 5347121 hinges on.
-    echo "file2" > "$PRIVATE/samples/file2.txt"
-    commit_as "$PRIVATE" "Private Dev" "private@example.com" \
-        "Add samples/file2.txt" samples/file2.txt
-
-    if ! run_sync_core_for_graft; then
-        # Currently expected: guard fires with "MISSING from sync branch"
-        # even though the rebase-merge would NOT actually delete the
-        # protected workflow. Surface the exact failure so the bug repro is
-        # legible in CI logs.
-        local err
-        err=$(cat "$WORK_DIR/sync-core.err")
-        if grep -q "MISSING from sync branch" "$WORK_DIR/sync-core.err"; then
-            fail "T69" "ADO 5347121 BUG REPRODUCED: incremental sync (protected file unchanged on public main) was hard-failed by the protected-paths guard. Replace blob-comparison with merge-tree simulation. stderr: $err"
-        else
-            fail "T69" "Second sync failed for an unexpected reason (not the ADO 5347121 guard): $err"
-        fi
-        cleanup; return
-    fi
-
-    # Post-fix expectation: sync completes successfully AND the protected
-    # workflow blob is still reachable from public main (the guard didn't
-    # spuriously roll anything back).
-    local main_blob_after
-    main_blob_after=$(git -C "$PUBLIC" rev-parse "main:.github/workflows/redirect-pull-requests.yml" 2>/dev/null || echo "")
-    if [[ "$main_blob_after" != "$main_blob_before" ]]; then
-        fail "T69" "Protected workflow blob on public main changed after sync (before=$main_blob_before after=$main_blob_after)"
-        cleanup; return
-    fi
-
-    pass "T69"
-    cleanup
-}
-
-# T70 — ADO 5347121 regression coverage (GREEN — must stay green post-fix).
-#
-# Seed-marks recovery topology: seed-marks-from-public.sh maps every private
-# ancestor mark to PUBLIC_SHA (which HAS .github/). The next sync's
-# fast-export emits `from :K deleteall M samples/...`; fast-import resolves
-# :K → PUBLIC_SHA, so the new sync branch commit's parent tree contains
-# .github/ while the new commit's tree does not. A rebase-merge of THIS
-# sync branch into public main would actually wipe the protected workflow.
-#
-# The guard MUST fire here. This test gives the wipe-detection branch real
-# pipeline coverage so the fix PR can't accidentally break the genuine
-# protection while it relaxes the over-pessimistic blob check.
-test_T70() {
-    run_test "T70" "guard (full pipeline): seed-marks recovery anchored on PUBLIC_SHA → workflow preserved [ADO 5347427 happy-path coverage]"
-    setup_repos
-    write_protected_sync_config
-
-    # Build a short private history under samples/.
-    mkdir -p "$PRIVATE/samples"
-    echo "alpha" > "$PRIVATE/samples/alpha.txt"
-    commit_as "$PRIVATE" "Private Dev" "private@example.com" \
-        "Add samples/alpha.txt" samples/alpha.txt
-    echo "beta" > "$PRIVATE/samples/beta.txt"
-    commit_as "$PRIVATE" "Private Dev" "private@example.com" \
-        "Add samples/beta.txt" samples/beta.txt
-
-    # Mirror the private include-set onto public main and add the protected
-    # workflow in the same commit so seed-marks' tree-equivalence check
-    # passes (it compares ls-tree filtered by exclude_pathspecs — .github/
-    # is excluded, so its presence on public is fine).
-    echo "# Private Repo" > "$PUBLIC/README.md"
-    mkdir -p "$PUBLIC/samples" "$PUBLIC/.github/workflows"
-    echo "alpha" > "$PUBLIC/samples/alpha.txt"
-    echo "beta" > "$PUBLIC/samples/beta.txt"
-    echo "name: redirect" > "$PUBLIC/.github/workflows/redirect-pull-requests.yml"
-    git -C "$PUBLIC" checkout -B main --quiet 2>/dev/null || \
-        git -C "$PUBLIC" checkout main --quiet
-    git -C "$PUBLIC" add -A
-    GIT_AUTHOR_NAME="Human" GIT_AUTHOR_EMAIL="human@example.com" \
-    GIT_COMMITTER_NAME="Human" GIT_COMMITTER_EMAIL="human@example.com" \
-        git -C "$PUBLIC" commit -m "seed public main with samples + protected workflow" --quiet
-
-    local private_sha public_sha
-    private_sha=$(git -C "$PRIVATE" rev-parse HEAD)
-    public_sha=$(git -C "$PUBLIC" rev-parse HEAD)
-
-    if ! run_seed_marks "$private_sha" "$public_sha"; then
-        fail "T70" "seed-marks-from-public failed (tree-equivalence over include-set should hold): $(cat "$WORK_DIR/seed.err")"
-        cleanup; return
-    fi
-
-    # Sanity: every public.marks entry points at public_sha (which has
-    # .github/). PRE-OPTION-B this was the topology that exposed ADO 5347427:
-    # the next fast-export anchored on a tree containing .github/ would emit
-    # a `deleteall` (under pathspec+--full-tree) so the new sync-branch
-    # commit's tree represented a real delete of .github/, the merge-tree
-    # guard correctly fired, and `workflow_dispatch` failed.
-    # POST-OPTION-B: fast-export runs in delta mode and filter-stream drops
-    # the M ops for `.github/` paths. The new commit inherits .github/ from
-    # the marks-anchored parent unchanged → no wipe → guard passes.
-    local bad_lines
-    bad_lines=$(awk -v sha="$public_sha" '$2 != sha { print }' "$MARKS_DIR/public.marks" | wc -l | tr -d ' ')
-    if [[ "$bad_lines" != "0" ]]; then
-        fail "T70" "Test setup error: public.marks contains $bad_lines entries not pointing to public_sha"
-        cleanup; return
-    fi
-
-    # Post-seed delta — first sync after seed-recovery. Under Option B this
-    # should succeed cleanly: the new private commit's M op for
-    # samples/gamma.txt is delta-applied against the marks-anchored parent
-    # (PUBLIC_SHA, which has .github/), and the resulting sync-branch tip
-    # tree contains both samples/gamma.txt AND the inherited
-    # .github/workflows/redirect-pull-requests.yml. The merge-tree guard
-    # then sees no protected-path delete and passes.
-    echo "gamma" > "$PRIVATE/samples/gamma.txt"
-    commit_as "$PRIVATE" "Private Dev" "private@example.com" \
-        "Add samples/gamma.txt" samples/gamma.txt
-
-    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-protoseed"
-    if ! run_sync_core_for_graft; then
-        fail "T70" "Sync failed in seed-recovery scenario (Option B should preserve workflow). stderr: $(cat "$WORK_DIR/sync-core.err")"
-        cleanup; return
-    fi
-
-    # Guard must not fire — assert no protected-paths error in stderr.
-    if grep -q "MISSING from sync branch" "$WORK_DIR/sync-core.err"; then
-        fail "T70" "Guard wrongly fired in Option B happy-path. stderr: $(cat "$WORK_DIR/sync-core.err")"
-        cleanup; return
-    fi
-
-    # Protected workflow blob must be reachable on the sync-branch tip
-    # (inherited from PUBLIC_SHA via parent-tree). Without this, a rebase-
-    # merge of the sync branch into public main would wipe the workflow.
-    local workflow_blob
-    workflow_blob=$(git -C "$PUBLIC" rev-parse --verify \
-        "refs/heads/$SYNC_BRANCH:.github/workflows/redirect-pull-requests.yml" 2>/dev/null || echo missing)
-    if [[ "$workflow_blob" == "missing" ]]; then
-        fail "T70" "Protected workflow file MISSING from sync-branch tip — Option B parent-tree inheritance failed."
-        cleanup; return
-    fi
-
-    # And the sample addition must have made it through.
-    if ! git -C "$PUBLIC" show "refs/heads/$SYNC_BRANCH:samples/gamma.txt" >/dev/null 2>&1; then
-        fail "T70" "Expected samples/gamma.txt missing from sync-branch tip."
-        cleanup; return
-    fi
-
-    pass "T70"
-    cleanup
-}
-
 # ─── Option B rename-across-boundary regression coverage (ADO 5347427) ───
 # fast-export now runs with --no-renames, decomposing renames into D+M pairs
 # so filter-stream can filter each side independently. These tests confirm
@@ -3590,6 +2794,10 @@ test_T77() {
     fi
 }
 
+merge_sync_branch_to_public_main() {
+    git -C "$PUBLIC" checkout -B main "refs/heads/$SYNC_BRANCH" --quiet
+}
+
 test_T78() {
     run_test "T78" "incremental sync retains blocked published content, propagates deletion, and preserves public-owned exclusions"
     setup_repos
@@ -3668,7 +2876,7 @@ test_T79() {
     git -C "$PUBLIC" remote add origin "$origin"
     git -C "$PUBLIC" push --quiet origin main
     local remote_before
-    remote_before=$(git -C "$origin" rev-parse main)
+    remote_before=$(git --git-dir="$origin" rev-parse main)
 
     SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-force-full"
     local sync_output="$WORK_DIR/sync-core.out"
@@ -3692,7 +2900,7 @@ test_T79() {
 
     local marks_after remote_after
     marks_after=$(sha256sum "$MARKS_DIR"/* | sort)
-    remote_after=$(git -C "$origin" rev-parse main)
+    remote_after=$(git --git-dir="$origin" rev-parse main)
     if [[ $sync_exit -eq 0 ]]; then
         fail "T79" "FORCE_FULL invocation succeeded"
     elif ! grep -q "^sync_error=FORCE_FULL_DISABLED$" "$sync_output"; then
@@ -3778,6 +2986,7 @@ test_T75() {
     CONFIG_FILE="$WORK_DIR/sync-config.json"
     cat > "$CONFIG_FILE" <<'EOF'
 {
+  "default_include_paths": ["infrastructure/", "samples/"],
   "exclude_pathspecs": [":!internal/", ":!docs/", ":!.azure-pipelines/", ":!.github/", ":!CONTRIBUTING.md", ":!README.md"],
   "exclude_basenames": [".ci-skip", ".code-ci-skip"],
   "public_repo": {"owner": "test", "name": "test"},
@@ -3804,82 +3013,385 @@ EOF
     cleanup
 }
 
-# T76 — Regression: excluded-paths-only commits after seed-marks recovery must
-# NOT produce a false has_imports=1. Prior to this fix, blob data in the
-# filtered stream could contain lines starting with "commit " (e.g., in
-# documentation text), causing stream_has_commits to return a false positive.
-# fast-import would exit 0 (processing only blobs) without creating the sync
-# branch, then apply_public_overlay would fail with "imports reported but
-# refs/heads/$SYNC_BRANCH is missing". The fix: (a) stream_has_commits now
-# uses a two-line pattern (commit refs/... + mark :) that cannot appear inside
-# blob data blocks, and (b) run_fast_import verifies the ref was actually
-# created after fast-import exits 0 (returns 2 if not). The ref verification
-# is the authoritative safety net; the pattern match is a fast-path skip.
-# See: https://github.com/microsoft-foundry/foundry-samples-pr/actions/runs/28848650787
-test_T76() {
-    run_test "T76" "sync-core.sh: excluded-paths-only commits + CODEOWNERS diff → standalone bot commit (blob false-positive regression)"
-    setup_repos
+test_T81() {
+    run_test "T81" "public-only root docs changed between syncs remain unchanged"
+    setup_public_with_extras
+    write_graft_sync_config
 
-    # First sync: create a real included-path commit so marks are established.
-    echo "v1" > "$PRIVATE/samples.txt"
-    commit_as "$PRIVATE" "Dev" "dev@example.com" "Add sample" samples.txt
-    run_sync_core || { fail "T76" "First sync failed: $(cat "$WORK_DIR/sync-core.err")"; cleanup; return; }
-
-    # Add a CODEOWNERS file (will be different from public's empty state)
-    mkdir -p "$PRIVATE/.github"
-    echo "* @team-devx" > "$PRIVATE/.github/CODEOWNERS"
-    commit_as "$PRIVATE" "Dev" "dev@example.com" "Add CODEOWNERS" .github/CODEOWNERS
-
-    # Now add an excluded-paths-only commit whose blob content contains
-    # "commit refs/heads/..." text — the string that previously triggered the
-    # false positive in stream_has_commits (even "commit gets..." triggered
-    # the old "^commit " pattern).
-    mkdir -p "$PRIVATE/internal"
-    cat > "$PRIVATE/internal/notes.md" <<'BLOB'
-This documentation discusses the sync pipeline.
-
-commit refs/heads/main is how fast-export references a branch.
-commit gets a private branch named mirror/public-{sha}-{slug}
-BLOB
-    commit_as "$PRIVATE" "Dev" "dev@example.com" "Internal docs with commit-like text" internal/notes.md
-
-    # Second sync — only excluded-paths commits since last sync, but CODEOWNERS
-    # changed. Should produce a standalone bot commit for CODEOWNERS, NOT an
-    # error about missing sync branch.
-    run_sync_core || { fail "T76" "Second sync failed (expected standalone CODEOWNERS commit): $(cat "$WORK_DIR/sync-core.err")"; cleanup; return; }
-
-    # The sync branch should exist with CODEOWNERS applied
-    if ! git -C "$PUBLIC" rev-parse --verify "refs/heads/$SYNC_BRANCH" >/dev/null 2>&1; then
-        fail "T76" "Sync branch $SYNC_BRANCH was not created"
+    local private_sha public_sha
+    private_sha=$(git -C "$PRIVATE" rev-parse HEAD)
+    public_sha=$(git -C "$PUBLIC" rev-parse HEAD)
+    if ! run_seed_marks "$private_sha" "$public_sha"; then
+        fail "T81" "Initial seed failed: $(cat "$WORK_DIR/seed.err")"
         cleanup; return
     fi
 
-    # Verify CODEOWNERS landed on the sync branch
-    local co_content
-    co_content=$(git -C "$PUBLIC" show "$SYNC_BRANCH:.github/CODEOWNERS" 2>/dev/null || true)
-    if [[ "$co_content" == "* @team-devx" ]]; then
-        pass "T76"
+    echo "# Public README restored" > "$PUBLIC/README.md"
+    echo "# Public CONTRIBUTING restored" > "$PUBLIC/CONTRIBUTING.md"
+    commit_as "$PUBLIC" "Public Dev" "public@example.com" \
+        "Restore public contribution docs" README.md CONTRIBUTING.md
+    local readme_blob contributing_blob
+    readme_blob=$(git -C "$PUBLIC" rev-parse "main:README.md")
+    contributing_blob=$(git -C "$PUBLIC" rev-parse "main:CONTRIBUTING.md")
+
+    echo "shared v2" > "$PRIVATE/samples/shared.txt"
+    commit_as "$PRIVATE" "Private Dev" "private@example.com" \
+        "Update shared sample" samples/shared.txt
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-public-docs"
+    if ! run_sync_core_for_graft; then
+        fail "T81" "Incremental sync failed: $(cat "$WORK_DIR/sync-core.err")"
+        cleanup; return
+    fi
+
+    local result_tree
+    result_tree=$(git -C "$PUBLIC" merge-tree --write-tree \
+        main "refs/heads/$SYNC_BRANCH" | head -n 1)
+    if [[ "$(git -C "$PUBLIC" rev-parse "$result_tree:README.md")" != "$readme_blob" ]]; then
+        fail "T81" "Prospective merge changed the public README."
+    elif [[ "$(git -C "$PUBLIC" rev-parse "$result_tree:CONTRIBUTING.md")" != "$contributing_blob" ]]; then
+        fail "T81" "Prospective merge changed public CONTRIBUTING.md."
+    elif [[ "$(git -C "$PUBLIC" show "$result_tree:samples/shared.txt")" != "shared v2" ]]; then
+        fail "T81" "Prospective merge omitted the in-scope sample update."
     else
-        fail "T76" "CODEOWNERS not found on sync branch (got: '$co_content')"
+        pass "T81"
     fi
     cleanup
 }
 
-test_T64
-test_T65
-test_T66
-test_T67
-test_T68
-test_T69
-test_T70
+test_T82() {
+    run_test "T82" "default scope plus exact-file and directory additions"
+    setup_repos
+    write_graft_sync_config
+
+    mkdir -p "$PRIVATE/infrastructure" "$PRIVATE/samples" \
+        "$PRIVATE/ops" "$PRIVATE/extras/dir" "$PRIVATE/extras/directory-sibling" \
+        "$PRIVATE/other"
+    echo "infra" > "$PRIVATE/infrastructure/main.bicep"
+    echo "sample" > "$PRIVATE/samples/app.txt"
+    echo "exact" > "$PRIVATE/ops/exact.txt"
+    echo "not exact" > "$PRIVATE/ops/exact.txt.sibling"
+    echo "directory" > "$PRIVATE/extras/dir/file.txt"
+    echo "not directory" > "$PRIVATE/extras/directory-sibling/file.txt"
+    echo "drop" > "$PRIVATE/other/drop.txt"
+    commit_as "$PRIVATE" "Private Dev" "private@example.com" "Add scoped files" \
+        infrastructure/main.bicep samples/app.txt ops/exact.txt \
+        ops/exact.txt.sibling extras/dir/file.txt \
+        extras/directory-sibling/file.txt other/drop.txt
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-additional"
+    if ! env \
+        PRIVATE_REPO="$PRIVATE" \
+        PUBLIC_REPO="$PUBLIC" \
+        SYNC_BRANCH="$SYNC_BRANCH" \
+        MARKS_DIR="$MARKS_DIR" \
+        CONFIG_FILE="$CONFIG_FILE" \
+        MAILMAP_FILE="$MAILMAP" \
+        SOURCE_REF="refs/heads/main" \
+        SYNC_ADDITIONAL_PATHS="ops/exact.txt:extras/dir/" \
+        DRY_RUN=1 \
+        bash "$SYNC_SCRIPT" 2>"$WORK_DIR/sync-core.err"; then
+        fail "T82" "Scoped sync failed: $(cat "$WORK_DIR/sync-core.err")"
+        cleanup; return
+    fi
+
+    local expected missing=()
+    for expected in infrastructure/main.bicep samples/app.txt ops/exact.txt extras/dir/file.txt; do
+        git -C "$PUBLIC" cat-file -e "$SYNC_BRANCH:$expected" 2>/dev/null || missing+=("$expected")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        fail "T82" "Expected scoped files missing: ${missing[*]}"
+    elif git -C "$PUBLIC" cat-file -e "$SYNC_BRANCH:ops/exact.txt.sibling" 2>/dev/null \
+        || git -C "$PUBLIC" cat-file -e "$SYNC_BRANCH:extras/directory-sibling/file.txt" 2>/dev/null \
+        || git -C "$PUBLIC" cat-file -e "$SYNC_BRANCH:other/drop.txt" 2>/dev/null; then
+        fail "T82" "Exact-file or directory-prefix matching admitted an out-of-scope sibling."
+    else
+        pass "T82"
+    fi
+    cleanup
+}
+
+test_T83() {
+    run_test "T83" "additional path normalization rejects unsafe and reserved forms"
+
+    local bad
+    for bad in "/absolute" "../traversal" "a/../b" "a//b" \
+        ":leading" "trailing:" "double::entry" "has space" \
+        "README.md" "CONTRIBUTING.md" ".github/workflow.yml" \
+        "public-overlay/file.txt"; do
+        if bash "$SCOPE_ASSERT_SCRIPT" --normalize-only "$bad" \
+            > /dev/null 2> /dev/null; then
+            fail "T83" "Unsafe or reserved path was accepted: $bad"
+            return
+        fi
+    done
+
+    local normalized
+    normalized=$(bash "$SCOPE_ASSERT_SCRIPT" --normalize-only \
+        "ops/exact.txt:extras/dir/:ops/exact.txt")
+    if [[ "$normalized" == "ops/exact.txt:extras/dir/" ]]; then
+        pass "T83"
+    else
+        fail "T83" "Unexpected normalization result: '$normalized'"
+    fi
+}
+
+test_T84() {
+    run_test "T84" "scope assertion rejects an unexpected path in an orphan result"
+    setup_repos
+    write_graft_sync_config
+
+    mkdir -p "$PUBLIC/samples"
+    echo "# Public README" > "$PUBLIC/README.md"
+    echo "shared" > "$PUBLIC/samples/shared.txt"
+    commit_as "$PUBLIC" "Public Dev" "public@example.com" \
+        "Seed public main" README.md samples/shared.txt
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-orphan"
+    git -C "$PUBLIC" checkout --orphan "$SYNC_BRANCH" --quiet
+    git -C "$PUBLIC" rm -rf --quiet . 2>/dev/null || true
+    mkdir -p "$PUBLIC/samples"
+    echo "# Public README" > "$PUBLIC/README.md"
+    echo "shared" > "$PUBLIC/samples/shared.txt"
+    echo "unexpected" > "$PUBLIC/rogue.txt"
+    git -C "$PUBLIC" add README.md samples/shared.txt rogue.txt
+    GIT_AUTHOR_NAME="Bot" GIT_AUTHOR_EMAIL="bot@example.com" \
+    GIT_COMMITTER_NAME="Bot" GIT_COMMITTER_EMAIL="bot@example.com" \
+        git -C "$PUBLIC" commit -m "Orphan generated result" --quiet
+
+    if bash "$SCOPE_ASSERT_SCRIPT" \
+        --repo "$PUBLIC" \
+        --base-ref main \
+        --head-ref "refs/heads/$SYNC_BRANCH" \
+        --config "$CONFIG_FILE" \
+        > "$WORK_DIR/scope.out" 2> "$WORK_DIR/scope.err"; then
+        fail "T84" "Scope assertion accepted an orphan result with rogue.txt."
+    elif ! grep -q "rogue.txt" "$WORK_DIR/scope.err"; then
+        fail "T84" "Scope failure did not report rogue.txt: $(cat "$WORK_DIR/scope.err")"
+    else
+        pass "T84"
+    fi
+    cleanup
+}
+
+test_T86() {
+    run_test "T86" "additional path materializes even when marks already passed its commit"
+    setup_repos
+    write_graft_sync_config
+
+    mkdir -p "$PRIVATE/samples" "$PRIVATE/ops"
+    echo "default" > "$PRIVATE/samples/default.txt"
+    echo "existing extra" > "$PRIVATE/ops/existing.txt"
+    commit_as "$PRIVATE" "Private Dev" "private@example.com" \
+        "Add default and extra content" samples/default.txt ops/existing.txt
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-defaults"
+    if ! run_sync_core_for_graft; then
+        fail "T86" "Default sync failed: $(cat "$WORK_DIR/sync-core.err")"
+        cleanup; return
+    fi
+    merge_sync_branch_to_public_main
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-extra"
+    if ! SYNC_ADDITIONAL_PATHS="ops/existing.txt" run_sync_core_for_graft; then
+        fail "T86" "Additional-path reconciliation failed: $(cat "$WORK_DIR/sync-core.err")"
+        cleanup; return
+    fi
+
+    if [[ "$(git -C "$PUBLIC" show "$SYNC_BRANCH:ops/existing.txt")" == "existing extra" ]]; then
+        pass "T86"
+    else
+        fail "T86" "Existing extra path was not materialized after its commit was marked."
+    fi
+    cleanup
+}
+
+test_T87() {
+    run_test "T87" "newly unblocked sample materializes without a new private commit"
+    setup_repos
+    write_graft_sync_config
+
+    mkdir -p "$PRIVATE/samples/allowed" "$PRIVATE/samples/blocked"
+    echo "allowed" > "$PRIVATE/samples/allowed/content.txt"
+    echo "blocked" > "$PRIVATE/samples/blocked/content.txt"
+    commit_as "$PRIVATE" "Private Dev" "private@example.com" \
+        "Add allowed and blocked samples" \
+        samples/allowed/content.txt samples/blocked/content.txt
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-blocked"
+    if ! SYNC_BLOCKED_PATHS="samples/blocked" run_sync_core_for_graft; then
+        fail "T87" "Blocked sync failed: $(cat "$WORK_DIR/sync-core.err")"
+        cleanup; return
+    fi
+    merge_sync_branch_to_public_main
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-unblocked"
+    if ! run_sync_core_for_graft; then
+        fail "T87" "Unblocked reconciliation failed: $(cat "$WORK_DIR/sync-core.err")"
+        cleanup; return
+    fi
+
+    if [[ "$(git -C "$PUBLIC" show "$SYNC_BRANCH:samples/blocked/content.txt")" == "blocked" ]]; then
+        pass "T87"
+    else
+        fail "T87" "Newly unblocked sample was not materialized."
+    fi
+    cleanup
+}
+
+test_T88() {
+    run_test "T88" "blocked private deletion preserves the published sample"
+    setup_repos
+    write_graft_sync_config
+
+    mkdir -p "$PRIVATE/samples/blocked"
+    echo "published" > "$PRIVATE/samples/blocked/content.txt"
+    commit_as "$PRIVATE" "Private Dev" "private@example.com" \
+        "Publish sample" samples/blocked/content.txt
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-published"
+    if ! run_sync_core_for_graft; then
+        fail "T88" "Initial sync failed: $(cat "$WORK_DIR/sync-core.err")"
+        cleanup; return
+    fi
+    merge_sync_branch_to_public_main
+
+    git -C "$PRIVATE" rm --quiet samples/blocked/content.txt
+    commit_as "$PRIVATE" "Private Dev" "private@example.com" \
+        "Delete blocked sample"
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-blocked-delete"
+    if ! SYNC_BLOCKED_PATHS="samples/blocked" run_sync_core_for_graft; then
+        fail "T88" "Blocked deletion sync failed: $(cat "$WORK_DIR/sync-core.err")"
+        cleanup; return
+    fi
+
+    if [[ "$(git -C "$PUBLIC" show "main:samples/blocked/content.txt")" == "published" ]]; then
+        pass "T88"
+    else
+        fail "T88" "Blocked private deletion removed or changed the published sample."
+    fi
+    cleanup
+}
+
+test_T92() {
+    run_test "T92" "explicit addition overrides a legacy static exclusion narrowly"
+    setup_repos
+    write_graft_sync_config
+
+    mkdir -p "$PRIVATE/samples" "$PRIVATE/docs"
+    echo "default" > "$PRIVATE/samples/default.txt"
+    echo "approved" > "$PRIVATE/docs/approved.md"
+    echo "not approved" > "$PRIVATE/docs/sibling.md"
+    commit_as "$PRIVATE" "Private Dev" "private@example.com" \
+        "Add default and documentation content" \
+        samples/default.txt docs/approved.md docs/sibling.md
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-docs"
+    if ! SYNC_ADDITIONAL_PATHS="docs/approved.md" run_sync_core_for_graft; then
+        fail "T92" "Explicit excluded-path addition failed: $(cat "$WORK_DIR/sync-core.err")"
+        cleanup; return
+    fi
+
+    if [[ "$(git -C "$PUBLIC" show "$SYNC_BRANCH:docs/approved.md")" != "approved" ]]; then
+        fail "T92" "Approved exact file was not synced."
+    elif git -C "$PUBLIC" cat-file -e "$SYNC_BRANCH:docs/sibling.md" 2>/dev/null; then
+        fail "T92" "Exact file addition admitted an excluded sibling."
+    else
+        pass "T92"
+    fi
+    cleanup
+}
+
+test_T93() {
+    run_test "T93" "reconciliation rejects a tracked symlink ancestor"
+    setup_repos
+    write_graft_sync_config
+
+    mkdir -p "$PRIVATE/samples" "$PRIVATE/docs/nested"
+    echo "default" > "$PRIVATE/samples/default.txt"
+    echo "approved" > "$PRIVATE/docs/nested/approved.md"
+    commit_as "$PRIVATE" "Private Dev" "private@example.com" \
+        "Add default and nested documentation" \
+        samples/default.txt docs/nested/approved.md
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-defaults"
+    if ! run_sync_core_for_graft; then
+        fail "T93" "Default sync failed: $(cat "$WORK_DIR/sync-core.err")"
+        cleanup; return
+    fi
+    merge_sync_branch_to_public_main
+
+    local symlink_blob
+    symlink_blob=$(printf '../outside' | git -C "$PUBLIC" hash-object -w --stdin)
+    git -C "$PUBLIC" update-index --add \
+        --cacheinfo "120000,$symlink_blob,docs"
+    GIT_AUTHOR_NAME="Public Dev" GIT_AUTHOR_EMAIL="public@example.com" \
+    GIT_COMMITTER_NAME="Public Dev" GIT_COMMITTER_EMAIL="public@example.com" \
+        git -C "$PUBLIC" commit -m "Add public-owned docs symlink" --quiet
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-symlink"
+    if SYNC_ADDITIONAL_PATHS="docs/nested/approved.md" run_sync_core_for_graft; then
+        fail "T93" "Reconciliation followed or accepted a tracked symlink ancestor."
+    elif ! grep -q "symlink ancestor 'docs'" "$WORK_DIR/sync-core.err"; then
+        fail "T93" "Symlink rejection was not clearly reported: $(cat "$WORK_DIR/sync-core.err")"
+    else
+        pass "T93"
+    fi
+    cleanup
+}
+
+test_T94() {
+    run_test "T94" "scope assertion rejects transient out-of-scope history"
+    setup_repos
+    write_graft_sync_config
+
+    mkdir -p "$PUBLIC/samples"
+    echo "base" > "$PUBLIC/samples/base.txt"
+    commit_as "$PUBLIC" "Public Dev" "public@example.com" \
+        "Seed public main" samples/base.txt
+
+    SYNC_BRANCH="sync/test-$$-${TESTS_RUN}-transient"
+    git -C "$PUBLIC" checkout -b "$SYNC_BRANCH" main --quiet
+    echo "transient secret" > "$PUBLIC/rogue.txt"
+    commit_as "$PUBLIC" "Sync Bot" "bot@example.com" \
+        "Temporarily add rogue path" rogue.txt
+    git -C "$PUBLIC" rm --quiet rogue.txt
+    commit_as "$PUBLIC" "Sync Bot" "bot@example.com" \
+        "Remove rogue path"
+
+    if bash "$SCOPE_ASSERT_SCRIPT" \
+        --repo "$PUBLIC" \
+        --base-ref main \
+        --head-ref "refs/heads/$SYNC_BRANCH" \
+        --config "$CONFIG_FILE" \
+        > "$WORK_DIR/scope.out" 2> "$WORK_DIR/scope.err"; then
+        fail "T94" "Scope assertion accepted transient out-of-scope history."
+    elif ! grep -q "rogue.txt" "$WORK_DIR/scope.err"; then
+        fail "T94" "History failure did not identify rogue.txt: $(cat "$WORK_DIR/scope.err")"
+    else
+        pass "T94"
+    fi
+    cleanup
+}
+
 test_T71
 test_T72
 test_T73
 test_T74
 test_T75
-test_T76
 test_T77
 test_T78
 test_T79
+test_T81
+test_T82
+test_T83
+test_T84
+test_T86
+test_T87
+test_T88
+test_T92
+test_T93
+test_T94
 
 summary

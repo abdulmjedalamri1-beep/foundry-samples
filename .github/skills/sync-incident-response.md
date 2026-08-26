@@ -1,6 +1,6 @@
 # Sync Incident Response
 
-Authoritative playbook for diagnosing and recovering from `sync-to-public` pipeline failures.
+Authoritative playbook for diagnosing and recovering from failures in the operator-run private-to-public bridge.
 Read this file completely before taking any action when a sync run fails.
 
 ## 1. Get the failure log
@@ -14,8 +14,8 @@ gh run view <run-id> --repo microsoft-foundry/foundry-samples-pr --log > /tmp/sy
 ```
 
 The failing step is almost always **"Run sync pipeline"** which calls `sync-core.sh`.
-Check `public-overlay/.github/scripts/mirror-back.sh` failures separately via the
-`mirror-back` workflow (`microsoft-foundry/foundry-samples` Actions tab).
+Mirror-back is public-owned automation; check its failures separately via the
+`mirror-back` workflow in the `microsoft-foundry/foundry-samples` Actions tab.
 
 ---
 
@@ -27,8 +27,8 @@ Run these greps against the log in order:
 # Type A — marks drift / object not found
 grep -E "object not found|seed-marks recovery|Tree mismatch|fatal:" /tmp/sync-run.log
 
-# Type B — protected-paths guard
-grep "Protected-paths guard" /tmp/sync-run.log
+# Type B — generated-diff scope guard
+grep -E "Generated-diff|scope guard|out-of-scope|reserved path" /tmp/sync-run.log
 
 # Type D — unmapped internal email
 grep "Unmapped internal email" /tmp/sync-run.log
@@ -45,7 +45,7 @@ grep "imports reported but.*is missing" /tmp/sync-run.log
 |---------------|-------------|---------|
 | `object not found: <sha>` during fast-import | Marks drift | §3 |
 | `seed-marks recovery failed — likely true drift` | Marks drift | §3 |
-| `Protected-paths guard FAILED` | Protected-paths | §4 |
+| Generated-diff guard reports an out-of-scope or reserved path | Scope guard | §4 |
 | `mirror-back` run on public shows `Skipping sync-App commit <sha>` for a human commit | Mirror-back false-positive | §5 |
 | `Unmapped internal email: <alias> <email@microsoft.com>` | Unmapped email | §6 |
 | `imports reported but refs/heads/sync/... is missing` | Ghost import (blob false-positive) | §7 |
@@ -134,23 +134,29 @@ HEAD. Use `dry_run=true` first; proceed only after the tree-equivalence check pa
 
 ---
 
-## 4. Protected-paths guard failure
+## 4. Generated-diff scope guard failure
 
-The guard refused to push because the sync branch would delete or modify a
-public-only workflow file (`redirect-pull-requests.yml`, `mirror-back.yml`, or `run-setup.yml`).
+The generated branch contains a path outside `infrastructure/**`, `samples/**`,
+and the run's valid `additional_paths`, or it touches a reserved path:
+`README.md`, `CONTRIBUTING.md`, `.github/**`, or `public-overlay/**`.
 
 Recovery:
-1. If the workflow is missing from public main, restore it via a direct human PR on public first.
-2. Then re-anchor marks: `workflow_dispatch` → `seed_from_public_sha=<new-public-HEAD>`.
 
-Full procedure in `docs/sync-cutover-runbook.md` and the
-[Sync Recovery Runbook](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md).
+1. Read the guard output and identify whether it failed before push or immediately before merge.
+2. For public metadata, open a normal public PR. Do not restore an overlay or add a reserved path to `additional_paths`.
+3. For an approved non-reserved path, correct `additional_paths`: colon-separated entries, trailing `/` for a directory prefix, no trailing `/` for one exact file.
+4. Start with `dry_run=true`. A successful dry run pushes `sync/dry-run-*` for inspection but creates no PR, performs no merge, and does not update marks.
+5. If fresh public `main` introduced real divergence, reconcile through reviewed PRs before using verified seed recovery.
+
+A pre-push failure creates no remote branch or PR. A pre-merge failure leaves the
+existing PR unmerged and does not update marks. Full scope and failure semantics
+are in [Repo Sync Automation](../../docs/repo-sync-automation.md#generated-diff-scope-guard).
 
 ---
 
 ## 5. Mirror-back false-positive
 
-Mirror-back (`public-overlay/.github/scripts/mirror-back.sh`) skips commits whose
+Mirror-back (`microsoft-foundry/foundry-samples:.github/scripts/mirror-back.sh`) skips commits whose
 **author** matches a sync-bot identity. It does NOT skip based on committer alone.
 
 Relevant identities (`PRIMARY_SYNC_BOT` / `LEGACY_SYNC_BOT` at top of script):
@@ -188,7 +194,7 @@ The "Run sync pipeline" step fails with:
 Unmapped internal email: <alias> <email@microsoft.com>
 ```
 
-The `fix-unmapped-emails` workflow is manual-only during the public-first cutover. It
+The `fix-unmapped-emails` workflow is manual-only. It
 opens or updates a mailmap fix PR only when an operator dispatches it.
 
 ### What happened
@@ -228,17 +234,17 @@ gh api repos/microsoft-foundry/foundry-samples-pr/rulesets/9151848 \
 
 ---
 
-## 7. Ghost import — blob false-positive
+## 7. Historical ghost import — blob false-positive
 
 ### What happened
 
-All commits between the marks-cache seed point and private HEAD touched only excluded
-paths (`.github/`, `docs/`, etc.). The filter correctly dropped every commit block,
+All commits between the marks-cache seed point and private HEAD touched only paths
+outside the then-active publication scope. The filter correctly dropped every commit block,
 but blob objects always pass through `filter-stream.py`. One of those blobs contained
 text that matched the `stream_has_commits` heuristic (previously `grep "^commit "`,
 now a two-line awk pattern). `git fast-import` processed a blob-only stream, exited 0
 without creating any ref, and the pipeline set `has_imports=1` falsely. When
-`apply_public_overlay` tried to check out the sync branch, it crashed:
+the now-retired `apply_public_overlay` step tried to check out the sync branch, it crashed:
 
 ```
 ERROR: imports reported but refs/heads/sync/private-to-public-... is missing (public-overlay)
@@ -250,11 +256,11 @@ ERROR: imports reported but refs/heads/sync/private-to-public-... is missing (pu
    ```bash
    git log --oneline <last_synced_sha>..HEAD
    ```
-2. Verify they all touch excluded paths:
+2. Verify they all touch paths outside the positive scope:
    ```bash
    git diff --name-only <last_synced_sha>..HEAD
    ```
-   Cross-reference with `.github/sync-config.json` → `exclude_pathspecs`.
+   Compare with `infrastructure/**`, `samples/**`, and that run's `additional_paths`.
 3. Check the filtered stream for blob content that could false-positive:
    ```bash
    grep -n "^commit refs/" /tmp/filtered-stream  # should be zero for this failure type
@@ -262,7 +268,7 @@ ERROR: imports reported but refs/heads/sync/private-to-public-... is missing (pu
 
 ### Recovery
 
-After PR #665 merged, this failure type should not recur:
+After PR #665 merged, this historical failure type should not recur:
 - `stream_has_commits` uses a two-line awk pattern (`commit refs/...` + `mark :`) that
   is extremely unlikely to appear in blob data.
 - `run_fast_import` verifies the target ref was created; returns exit code 2 if not,
@@ -270,8 +276,8 @@ After PR #665 merged, this failure type should not recur:
 
 If it somehow recurs:
 - **Do NOT use `seed_from_public_sha`** — the marks are fine.
-- The next run with real (non-excluded) commits will succeed normally.
-- If urgent: manually trigger a re-run; if the same excluded-only commits are HEAD,
+- The next run with real in-scope commits will succeed normally.
+- If urgent: manually trigger a re-run; if the same out-of-scope-only commits are HEAD,
   the fixed code will exit cleanly with `has_changes=false`.
 
 > ℹ️ **Historical note:** First observed 2026-07-07. The triggering blob was
@@ -286,20 +292,8 @@ If it somehow recurs:
 |------|---------|
 | `.github/scripts/sync-core.sh` | Main sync driver; marks cache load/save, `git fast-import`, auto seed-marks recovery |
 | `.github/scripts/seed-marks-from-public.sh` | Synthesizes fresh marks from a known-good public SHA; called by sync-core and manually via `seed_from_public_sha` input |
-| `public-overlay/.github/scripts/mirror-back.sh` | Runs on public repo; detects human commits and opens mirror PRs in private |
-| `.github/tests/test-mirror-back.sh` | Unit test harness for mirror-back; bash, stubbed `gh`, runs via WSL |
+| `microsoft-foundry/foundry-samples:.github/scripts/mirror-back.sh` | Public-owned helper that detects human commits and opens mirror PRs in private |
 | `.github/tests/test-sync.sh` | Sync test suite; T76 covers blob false-positive regression |
-| `.github/sync-config.json` | Public repo target, exclude list, protected paths |
-| `docs/repo-sync-automation.md` | Authoritative design doc — marks cache, mirror-back, recovery inputs, troubleshooting |
-| `docs/sync-cutover-runbook.md` | One-time surgery procedure (not for routine incidents) |
-
----
-
-## 9. Running the mirror-back tests
-
-```bash
-# From the repo root (WSL required on Windows)
-bash .github/tests/test-mirror-back.sh
-```
-
-Tests: MB1 clean replay, MB2 no-identity filter, MB3 bot-skip, **MB4 human-author+bot-committer (regression for #620)**, MB5 idempotency, MB6 dry-run, MB7 zero-before, MB8 helpers, MB9 conflict.
+| `.github/sync-config.json` | Default positive scope, reserved paths, and public repo target |
+| `docs/repo-sync-automation.md` | Authoritative design doc — scope, guards, marks cache, recovery inputs, and troubleshooting |
+| `docs/sync-cutover-runbook.md` | Historical one-time surgery record (not for routine incidents) |

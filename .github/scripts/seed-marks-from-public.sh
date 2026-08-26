@@ -81,20 +81,21 @@ fi
 
 config_get() {
     local key="$1"
-    CONFIG_FILE="$CONFIG_FILE" CONFIG_KEY="$key" python3 - <<'PY'
+    python3 - "$CONFIG_FILE" "$key" <<'PY'
 import json
-import os
+import sys
 
-with open(os.environ["CONFIG_FILE"]) as f:
+with open(sys.argv[1]) as f:
     cfg = json.load(f)
-keys = os.environ["CONFIG_KEY"].split(".")
+keys = sys.argv[2].split(".")
 val = cfg
 for k in keys:
     val = val[k]
 if isinstance(val, list):
-    print("\n".join(str(x) for x in val))
+    output = "\n".join(str(x) for x in val)
 else:
-    print(val)
+    output = str(val)
+sys.stdout.buffer.write((output + "\n").encode())
 PY
 }
 
@@ -124,13 +125,8 @@ build_dynamic_pathspecs() {
         if ! normalized=$(normalize_blocked_path "$raw"); then
             continue
         fi
-        if [[ -d "$PRIVATE_REPO/$normalized" ]]; then
-            printf ':!%s/\n' "$normalized"
-            count=$((count + 1))
-        elif [[ -e "$PRIVATE_REPO/$normalized" ]]; then
-            printf ':!%s\n' "$normalized"
-            count=$((count + 1))
-        fi
+        printf ':!%s/\n' "$normalized"
+        count=$((count + 1))
     done
 
     if [[ $count -gt 0 ]]; then
@@ -168,8 +164,32 @@ spec_to_path() {
 build_exclude_paths() {
     while IFS= read -r spec; do
         [[ -z "$spec" ]] && continue
+        local path
+        path=$(spec_to_path "$spec")
+        additional_overrides_exclusion "$path" && continue
+        printf '%s\n' "$path"
+    done < <(config_get "exclude_pathspecs")
+
+    while IFS= read -r spec; do
+        [[ -z "$spec" ]] && continue
         spec_to_path "$spec"
-    done < <(all_exclusion_pathspecs)
+    done < <(build_dynamic_pathspecs)
+}
+
+additional_overrides_exclusion() {
+    local excluded="$1"
+    local allowed bare
+    local -a additions=()
+    [[ -z "${SYNC_ADDITIONAL_PATHS:-}" ]] && return 1
+
+    IFS=':' read -r -a additions <<< "$SYNC_ADDITIONAL_PATHS"
+    for allowed in "${additions[@]}"; do
+        bare="${allowed%/}"
+        if [[ "$bare" == "$excluded" || "$bare" == "$excluded"/* ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Optional basename excludes (e.g. ".ci-skip" / ".code-ci-skip") — scattered
@@ -179,17 +199,41 @@ build_exclude_paths() {
 # stream. The key is optional; a missing key yields zero lines. Deliberately
 # NOT folded into pathspec_hash (kept in lockstep with sync-core.sh).
 build_exclude_basenames() {
-    CONFIG_FILE="$CONFIG_FILE" python3 - <<'PY'
+    python3 - "$CONFIG_FILE" <<'PY'
 import json
-import os
+import sys
 
-with open(os.environ["CONFIG_FILE"]) as f:
+with open(sys.argv[1]) as f:
     cfg = json.load(f)
 for b in cfg.get("exclude_basenames", []):
     b = str(b).strip()
     if b:
-        print(b)
+        sys.stdout.buffer.write((b + "\n").encode())
 PY
+}
+
+build_include_paths() {
+    config_get "default_include_paths"
+    if [[ -n "${SYNC_ADDITIONAL_PATHS:-}" ]]; then
+        tr ':' '\n' <<< "$SYNC_ADDITIONAL_PATHS"
+    fi
+}
+
+is_included_path() {
+    local path="$1"
+    local allowed bare
+    for allowed in "${INCLUDE_PATHS[@]:-}"; do
+        [[ -z "$allowed" ]] && continue
+        if [[ "$allowed" == */ ]]; then
+            bare="${allowed%/}"
+            if [[ "$path" == "$bare" || "$path" == "$bare"/* ]]; then
+                return 0
+            fi
+        elif [[ "$path" == "$allowed" ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 is_excluded_path() {
@@ -218,32 +262,19 @@ write_filtered_tree() {
     local output="$3"
     while IFS=$'\t' read -r meta path; do
         [[ -z "$path" ]] && continue
+        is_included_path "$path" || continue
         is_excluded_path "$path" && continue
         printf '%s\t%s\n' "$meta" "$path"
     done < <(git -C "$repo" ls-tree -r --full-tree "$sha") | sort > "$output"
 }
 
-compare_codeowners() {
-    local private_blob public_blob
-    if ! private_blob=$(git -C "$PRIVATE_REPO" rev-parse "$PRIVATE_SHA:.github/CODEOWNERS" 2>/dev/null); then
-        return 0
-    fi
-    if ! public_blob=$(git -C "$PUBLIC_REPO" rev-parse "$PUBLIC_SHA:.github/CODEOWNERS" 2>/dev/null); then
-        # Recoverable: a prior sync may have wiped CODEOWNERS from public, but
-        # sync-core's codeowners-sync step amends it back into the imported
-        # commit on every run. Warn rather than abort so the seed primitive is
-        # usable after a degraded-public state (which is exactly when graft
-        # recovery is needed). T58 still hard-fails on differing blobs.
-        log "WARNING: public is missing .github/CODEOWNERS — codeowners-sync will restore it on next run; continuing"
-        return 0
-    fi
-    if [[ "$private_blob" != "$public_blob" ]]; then
-        echo "CODEOWNERS differs: private .github/CODEOWNERS blob $private_blob, public blob $public_blob" >&2
-        return 1
-    fi
-}
-
 main() {
+    local -a INCLUDE_PATHS
+    mapfile -t INCLUDE_PATHS < <(build_include_paths)
+    if [[ ${#INCLUDE_PATHS[@]} -eq 0 ]]; then
+        echo "Sync config has no default include paths" >&2
+        exit 1
+    fi
     local -a EXCLUDE_PATHS
     mapfile -t EXCLUDE_PATHS < <(build_exclude_paths)
     local -a EXCLUDE_BASENAMES
@@ -266,9 +297,6 @@ main() {
     local mismatch=0
     if ! diff -u "$private_tree" "$public_tree" >&2; then
         echo "Tree mismatch between private $PRIVATE_SHA and public $PUBLIC_SHA over sync include-set" >&2
-        mismatch=1
-    fi
-    if ! compare_codeowners; then
         mismatch=1
     fi
     if [[ $mismatch -ne 0 ]]; then
@@ -310,12 +338,13 @@ main() {
     # the commit chains off. We have observed in production fast-export choosing
     # an arbitrary ancestor mark (e.g. ":219") as the parent of a post-seed
     # commit even when the underlying git parent is the seed. fast-import then
-    # fails with "fatal: mark :N not declared", triggers stale-marks recovery,
-    # which falls back to a discard-and-full-export — producing an orphan-style
-    # PR with hundreds of files of bidirectional divergence (PR #702 / run
-    # 25584711501). Mirroring every private mark to PUBLIC_SHA makes any such
-    # rewritten "from :N" reference resolve to public main, so the resulting
-    # commit on the public side is correctly anchored. The trade-off: we lose
+    # fails with "fatal: mark :N not declared". Historical recovery then fell
+    # back to a discard-and-full-export, producing an orphan-style PR with
+    # hundreds of files of bidirectional divergence (PR #702 / run 25584711501).
+    # Current recovery fails closed instead. Mirroring every private mark to
+    # PUBLIC_SHA makes any such rewritten "from :N" reference resolve to public
+    # main, so the resulting commit on the public side is correctly anchored.
+    # The trade-off: we lose
     # the "fail loud" property for actual private-side merges into pre-seed
     # ancestors, but the seed-pair tree-equivalence check above already
     # guarantees the public side has the same content under the include-set,

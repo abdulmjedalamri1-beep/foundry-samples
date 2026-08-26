@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      additional_paths:
+        description: 'Optional colon-separated repo-relative files or trailing-slash directories to sync in addition to infrastructure/ and samples/. Public metadata is not allowed.'
+        required: false
+        type: string
+        default: ''
       seed_from_public_sha:
         description: 'Public main commit SHA to graft from when seeding paired sync marks for recovery.'
         required: false
@@ -65,6 +70,16 @@ jobs:
           echo "owner=$(jq -r '.public_repo.owner' "$CONFIG_FILE")" >> "$GITHUB_OUTPUT"
           echo "repo=$(jq -r '.public_repo.name' "$CONFIG_FILE")" >> "$GITHUB_OUTPUT"
           echo "branch_prefix=$(jq -r '.sync_branch_prefix' "$CONFIG_FILE")" >> "$GITHUB_OUTPUT"
+
+      - name: Validate additional paths
+        id: scope
+        env:
+          ADDITIONAL_PATHS: ${{ inputs.additional_paths }}
+        run: |
+          set -euo pipefail
+          normalized="$(bash private-repo/.github/scripts/assert-sync-scope.sh \
+            --normalize-only "$ADDITIONAL_PATHS")"
+          echo "additional_paths=$normalized" >> "$GITHUB_OUTPUT"
 
       - name: Generate GitHub App token
         id: app-token
@@ -213,6 +228,7 @@ jobs:
           PRIVATE_REPO: ${{ github.workspace }}/private-repo
           PUBLIC_REPO: ${{ github.workspace }}/public-repo
           CONFIG_FILE: ${{ github.workspace }}/private-repo/.github/sync-config.json
+          SYNC_ADDITIONAL_PATHS: ${{ steps.scope.outputs.additional_paths }}
           # When recovering from a public SHA produced under a historical
           # block-list that differs from the current one, the operator must
           # supply seed_blocked_paths to make the tree-equivalence check pass.
@@ -272,6 +288,7 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
           SYNC_BLOCKED_PATHS: ${{ steps.blocklist.outputs.blocklist }}
           SYNC_BLOCKED_UNMAPPED: ${{ steps.unmapped-blocklist.outputs.blocklist }}
+          SYNC_ADDITIONAL_PATHS: ${{ steps.scope.outputs.additional_paths }}
         run: |
           # Merge validation blocklist and unmapped-email blocklist.
           if [[ -n "${SYNC_BLOCKED_UNMAPPED:-}" ]]; then
@@ -320,6 +337,11 @@ jobs:
           # Tunables for wait-and-merge.sh; defaults are 600s timeout / 15s poll.
           MERGE_POLL_TIMEOUT: '600'
           MERGE_POLL_INTERVAL: '15'
+          SYNC_SCOPE_ASSERT_SCRIPT: ${{ github.workspace }}/private-repo/.github/scripts/assert-sync-scope.sh
+          SYNC_SCOPE_PUBLIC_REPO: ${{ github.workspace }}/public-repo
+          SYNC_SCOPE_CONFIG: ${{ github.workspace }}/private-repo/.github/sync-config.json
+          SYNC_ADDITIONAL_PATHS: ${{ steps.scope.outputs.additional_paths }}
+          SYNC_BRANCH: ${{ steps.branch.outputs.name }}
         run: |
           BRANCH="${{ steps.branch.outputs.name }}"
           REPO="${{ steps.config.outputs.owner }}/${{ steps.config.outputs.repo }}"
@@ -331,6 +353,8 @@ jobs:
           **Authors:** ${{ steps.sync.outputs.authors }}
 
           **Validation gate:** mode=\`${{ steps.bypass-validate.outputs.mode }}\`; tracked=${{ steps.blocklist.outputs.tracked_count }}; blocked=${{ steps.blocklist.outputs.blocked_count }}.
+
+          **Sync scope:** \`infrastructure/\`, \`samples/\`${{ steps.scope.outputs.additional_paths != '' && format(', plus `{0}`', steps.scope.outputs.additional_paths) || '' }}.
 
           **Pre-sync public SHA:** \`${ROLLBACK_SHA}\`. Recover through a reviewed private fix plus dry-run and normal incremental sync; do not push directly to public \`main\`.
 
@@ -393,6 +417,7 @@ jobs:
             echo "| Bypass mode | \`${BYPASS_MODE:-unknown}\` |"
             echo "| Tracked samples (any reporter) | ${TRACKED:-0} |"
             echo "| Blocked samples (final, post-bypass) | ${BLOCKED:-0} |"
+            echo "| Additional paths | \`${{ steps.scope.outputs.additional_paths || '<none>' }}\` |"
             echo ""
             if [[ -n "${BLOCKLIST:-}" ]]; then
               echo "**Blocked paths (validation):**"
@@ -474,5 +499,6 @@ jobs:
           echo "- Commits synced: ${{ steps.sync.outputs.commit_count }}" >> $GITHUB_STEP_SUMMARY
           echo "- Authors: ${{ steps.sync.outputs.authors }}" >> $GITHUB_STEP_SUMMARY
           echo "- Has changes: ${{ steps.sync.outputs.has_changes }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Additional paths: \`${{ steps.scope.outputs.additional_paths || '<none>' }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "No PR created and marks cache NOT updated. Branch was pushed for inspection." >> $GITHUB_STEP_SUMMARY

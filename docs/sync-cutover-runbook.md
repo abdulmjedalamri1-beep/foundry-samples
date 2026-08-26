@@ -1,10 +1,12 @@
 # Sync Cutover Runbook
 
-This document records the **one-time** authorship-preservation cutover performed on 2026-04-29 against the public `foundry-samples` repository. It is preserved as a runbook so that a future similar surgery (a sync-pipeline replacement, an authorship rewrite, a public-repo history reset) has a known-good template.
+This document records the **one-time** authorship-preservation cutover performed on 2026-04-29 against the public `foundry-samples` repository. It is preserved as historical evidence, not as a reusable recovery template.
 
 > If you are a regular contributor and have arrived here looking for "how does sync work day to day," you want [Repo Sync Automation](repo-sync-automation.md). This document is for one-off pipeline surgery.
 >
 > **Historical procedure only:** the current sync workflow does not expose full-tree export, direct-public-main push, or force-push recovery. Do not use the steps below for a routine incident. Reconcile through reviewed PRs and use verified seed recovery with `dry_run=true` as documented in [Repo Sync Automation](repo-sync-automation.md).
+>
+> **Current scope:** the retained bridge defaults to `infrastructure/**` and `samples/**`. An operator may add approved non-reserved paths with `additional_paths`, but `README.md`, `CONTRIBUTING.md`, `.github/**`, and `public-overlay/**` are always reserved for normal public PRs. The current bridge runs a generated-diff scope guard before push and again immediately before merge.
 
 ## What changed
 
@@ -34,7 +36,7 @@ Recovering the old state, if ever needed, is a reset to either reference followe
 | Reference | Value (at cutover time) |
 |-----------|-------------------------|
 | Public `main` head | `f532c159ac80d60e5edc46693733801fee0c7469` |
-| Sync App (bypass actor) | `foundry-samples-repo-sync` (App ID `2846614`) |
+| Sync App (historical bypass actor at cutover time) | `foundry-samples-repo-sync` (App ID `2846614`) |
 | Bot user ID | `261063410` |
 | Public `main` ruleset ID | `6131793` |
 
@@ -44,7 +46,7 @@ Recovering the old state, if ever needed, is a reset to either reference followe
 
 - Confirm both repos are at green CI on `main`.
 - Confirm the new sync pipeline (filter-stream, mailmap, fast-export/fast-import) has been validated against a **dry-run** target. The dry run should produce a tree-equivalent `main` to what's currently public, with rewritten authorship.
-- Stop the nightly sync schedule for the duration of the cutover (workflow disabled in the UI).
+- Stop the then-nightly sync schedule for the duration of the historical cutover (workflow disabled in the UI).
 - Notify stakeholders that public `main` will force-push.
 
 ### 1. Snapshot
@@ -106,13 +108,13 @@ The current `sync-to-public.yml` cannot perform this operation. Any future histo
 
 ### 4. Re-enable the ruleset
 
-Set the ruleset back to "Active" in the UI. Verify that the App is still listed as a bypass actor; the disable/re-enable cycle should not have removed it, but check anyway.
+At the 2026-04-29 cutover, the ruleset was set back to "Active" and the App remained a bypass actor.
 
-> **Watch out for `Require approval of the most recent reviewable push`.** If this rule was on before the cutover, leave it **off** for the new sync model — it interferes with the App's direct-merge flow. See [Repo Sync Automation § Public Repo Branch Protection & App Bypass](repo-sync-automation.md#public-repo-branch-protection--app-bypass).
+> **Current boundary:** The App is no longer a public `main` ruleset bypass actor. Do not restore that historical configuration. The current bridge opens a reviewable public PR, waits for required checks, repeats the generated-diff scope guard, and rebase-merges as the App subject to the ruleset. See [Repo Sync Automation § Public Repo Branch Protection](repo-sync-automation.md#public-repo-branch-protection).
 
 ### 5. Verify
 
-Run the Verify Sync workflow on the public repo (`workflow_dispatch` of `verify-sync.yml`). It should report `drift=false`. If it doesn't, **stop** and investigate before re-enabling the schedule — drift right after a force-push almost always indicates a path-exclusion or filter bug.
+The historical cutover ran Verify Sync on the public repo and required `drift=false` before restoring operations. Drift immediately after the force-push indicated a path-exclusion or filter bug.
 
 Spot-check public `git blame` on a few recently-edited samples; the authors should be the real contributors, not the App or a single human placeholder.
 
@@ -137,41 +139,43 @@ Do **not** skip this step. The 2026-04-29 cutover did skip it (the runbook didn'
 
 At cutover time, the nightly workflow was re-enabled and its next run was checked. The current private→public workflow is manual-only.
 
-## Rollback
+## Historical rollback
 
-If the cutover produces an unexpected state and rollback is required:
+The 2026-04-29 rollback plan was:
 
 1. Disable the ruleset (step 2 above).
 2. `git push --force origin refs/tags/pre-authorship-cutover-YYYY-MM-DD:refs/heads/main` from a local clone with admin/bypass credentials.
 3. Re-enable the ruleset.
 4. Disable the sync schedule until the underlying issue is resolved.
 
-The `legacy/main-pre-authorship-cutover` branch is kept indefinitely as a secondary recovery path.
+The `legacy/main-pre-authorship-cutover` branch remains historical evidence. Do not use this rollback for a current bridge incident. Current incidents must reconcile content through reviewed PRs and use the fail-closed recovery in [Repo Sync Automation](repo-sync-automation.md#graft-synthesis-recovery).
 
 ## Post-cutover follow-ups
 
 The cutover surfaced three issues that were tracked separately:
 
-- **Auto-merge bypass not inherited.** GitHub's `--auto` merge runs as the system process, not the requesting actor, so the App's bypass permission was not applied. Resolved by replacing `--auto` with poll-then-direct-merge (`wait-and-merge.sh`). See [Repo Sync Automation § Wait-and-merge](repo-sync-automation.md#5-wait-and-merge-direct-merge-as-the-app).
-- **CodeQL `actions` analysis on public.** The public repo had `actions` enabled in default-setup CodeQL, producing false positives because the public repo has no workflow YAML to analyse (post-cutover). Resolved by unchecking `actions` in the public repo's Code Security settings.
+- **Historical auto-merge behavior.** GitHub's `--auto` merge ran as the system process rather than the requesting actor. The bridge now uses poll-then-rebase-merge (`wait-and-merge.sh`) so the run observes the merge before saving marks. The App is ruleset-bypass-free. See [Repo Sync Automation § Wait-and-merge](repo-sync-automation.md#7-wait-and-merge-ruleset-bound-app-rebase-merge).
+- **CodeQL `actions` analysis on public.** At cutover time, the public repo had `actions` enabled in default-setup CodeQL, producing false positives because the restored public workflow state was incomplete. The setting was corrected in the public repo's Code Security configuration.
 - **Public-only files wiped by the force-push.** Step 1a / 5a above did not exist in the original runbook; as a result, README.md, CONTRIBUTING.md, and seven public-only `.github/` workflows / scripts were lost and had to be restored later. The runbook has been updated to make the inventory and replay steps explicit.
 
 ## Lessons from 2026-06-10 sync recovery
 
-The sync saga of 2026-06-09 → 2026-06-10 reinforced several principles that this runbook predates. They are captured in the dedicated **sync-recovery runbook** in `foundry-devx-eng-docs`, which is the canonical playbook for *non-cutover* sync incidents (orphan-wipe recovery, marks-cache reseeding, protected-paths guard failures, blocked-validation backlogs):
+The sync saga of 2026-06-09 → 2026-06-10 reinforced several principles that this runbook predates. The older recovery runbook in `foundry-devx-eng-docs` remains useful for incident history, but its full-export, orphan-recovery, overlay, and per-file protected-path procedures are retired:
 
-- [`foundry-devx-eng-docs/operations/sync-recovery-runbook.md`](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md) — sync-recovery runbook (source-of-truth path; EngHub publication may substitute a `https://eng.ms/...` URL once it lands)
+- [`foundry-devx-eng-docs/operations/sync-recovery-runbook.md`](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md) — historical sync-recovery context
 
 Saga-specific lessons that *this* runbook absorbs:
 
-- **Public-only workflow files do not belong in `public-overlay/`.** PR [microsoft-foundry/foundry-samples-pr#513](https://github.com/microsoft-foundry/foundry-samples-pr/pull/513) (ADO 5347427) moved exclude-path filtering into `filter-stream.py` so sync-branch commits structurally inherit protected workflows from their marks-anchored parent. PR [microsoft-foundry/foundry-samples-pr#515](https://github.com/microsoft-foundry/foundry-samples-pr/pull/515) backported a public-only `azuredeploy.json` for template-10 the same day. Future cutover or orphan-recovery work must rely on the `protected_paths` guard and the runbook's restore steps, not on `public-overlay/` for workflows.
-- **The `merge-tree --write-tree` protected-paths guard is load-bearing.** PR [microsoft-foundry/foundry-samples-pr#493](https://github.com/microsoft-foundry/foundry-samples-pr/pull/493) (ADO 5347121) reworked `guard_protected_paths()` to simulate the prospective post-rebase-merge tree instead of inspecting the sync-branch tip blob. Any cutover that disables or rebuilds this guard must restore it before the first post-cutover sync.
-- **Scheduled sync stays paused until recovery is verified.** PR [microsoft-foundry/foundry-samples-pr#499](https://github.com/microsoft-foundry/foundry-samples-pr/pull/499) re-enabled the cron only after the guard fix landed. A cutover should follow the same pattern (see [step 6](#6-re-enable-the-schedule) — re-enable only after Verify Sync is clean).
-- **E2E orphan-wipe regression coverage exists.** PR [microsoft-foundry/foundry-samples-pr#518](https://github.com/microsoft-foundry/foundry-samples-pr/pull/518) (ADO 5349966) added test T73 to catch the exact "fast-export pathspec forces `--full-tree`" footgun. Run the sync E2E suite (`test-sync.yml`) before declaring a cutover green.
+- **The entire overlay is retired.** PR [microsoft-foundry/foundry-samples-pr#513](https://github.com/microsoft-foundry/foundry-samples-pr/pull/513) (ADO 5347427) established that public-only workflows did not belong in `public-overlay/`. The later 2026-08-26 incident, public PR [microsoft-foundry/foundry-samples#940](https://github.com/microsoft-foundry/foundry-samples/pull/940), showed that stale overlay copies of `README.md` and `CONTRIBUTING.md` could also overwrite public-owned metadata. `public-overlay/` is now reserved and has no active publication role.
+- **Special CODEOWNERS forwarding is retired.** Public `.github/CODEOWNERS` is public metadata and is maintained through normal public PRs.
+- **Positive scope replaces negative exclusions.** Current default scope is `infrastructure/**` and `samples/**`; `additional_paths` can add only approved non-reserved paths for one dispatch.
+- **Generated-diff guards replace per-file protection.** The bridge validates every actual changed path before push and repeats the same validation against fresh public `main` immediately before merge.
+- **Recovery must be verified before mutation.** Reconcile content through reviewed PRs, prove scoped tree equivalence, and run operator-driven seed recovery with `dry_run=true` before a real run.
+- **Destructive modes are retired.** Current workflow contract tests reject force-full, direct-main, unanchored full-export, and unrelated-history paths.
 
-For the full incident timeline, decisions, and recovery procedure, read the sync-recovery runbook linked above before touching this runbook for a fresh cutover.
+For the full incident timeline and historical decisions, read the sync-recovery runbook linked above. For current behavior and recovery, use [Repo Sync Automation](repo-sync-automation.md).
 
-## Why a force-push (and not a merge or a "soft" rewrite)
+## Why the historical cutover used a force-push
 
 Three reasons:
 
@@ -181,8 +185,8 @@ Three reasons:
 
 ## Related Documents
 
-- [Sync Recovery Runbook (foundry-devx-eng-docs)](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md) — Canonical playbook for non-cutover sync incidents (orphan-wipe, marks reseed, guard failures, validation backlogs). Read this for normal recovery; this cutover runbook only applies to one-time pipeline-replacement surgery.
-- [Repo Sync Automation](repo-sync-automation.md) — How the post-cutover sync works day-to-day
+- [Sync Recovery Runbook (foundry-devx-eng-docs)](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md) — Historical incident context; retired destructive and overlay recovery options are not current procedure.
+- [Repo Sync Automation](repo-sync-automation.md) — Current operator bridge scope, guards, failure semantics, and recovery
 - [Validation Contract](validation-contract.md) — Validation responsibilities (no longer cross-coupled with sync)
 - [Filter stream script](../.github/scripts/filter-stream.py) — Authorship rewriting + path filtering
 - [Sync mailmap](../.github/sync-mailmap) — Internal alias → public identity mapping

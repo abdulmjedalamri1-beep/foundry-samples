@@ -1,5 +1,9 @@
 {
   "description": "Configuration for automated sync from private to public repository.",
+  "default_include_paths": [
+    "infrastructure/",
+    "samples/"
+  ],
   "exclude_pathspecs": [
     ":!internal/",
     ":!docs/",
@@ -12,10 +16,6 @@
   "exclude_basenames": [
     ".ci-skip",
     ".code-ci-skip"
-  ],
-  "protected_paths": [
-    ".github/workflows/mirror-back.yml",
-    ".github/workflows/run-setup.yml"
   ],
   "public_repo": {
     "owner": "microsoft-foundry",

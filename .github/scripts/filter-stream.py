@@ -289,6 +289,18 @@ def path_is_excluded(path: str, exclude_prefixes: list[str]) -> bool:
     return False
 
 
+def path_is_included(
+    path: str, include_prefixes: list[str], include_files: list[str]
+) -> bool:
+    """True when a path is explicitly allowed by an exact file or directory prefix."""
+    if path in include_files:
+        return True
+    for prefix in include_prefixes:
+        if path == prefix or path.startswith(prefix + "/"):
+            return True
+    return False
+
+
 def basename_is_excluded(path: str, exclude_basenames: list[str]) -> bool:
     """True if ``path``'s final component matches any excluded basename.
 
@@ -325,6 +337,8 @@ def filter_stream(
     collect_unmapped: set | None = None,
     exclude_prefixes: list[str] | None = None,
     exclude_basenames: list[str] | None = None,
+    include_prefixes: list[str] | None = None,
+    include_files: list[str] | None = None,
 ) -> None:
     """Process a fast-export stream, rewriting emails and stripping empty commits.
 
@@ -333,6 +347,10 @@ def filter_stream(
     If source_ref and target_ref are provided, also rewrites 'commit <source_ref>'
     and 'reset <source_ref>' lines to point to target_ref. This is safer than a
     post-filter sed pass because it only touches command lines, not data blocks.
+
+    If include_prefixes or include_files is provided, only matching file
+    operations are retained. Prefixes use component-boundary matching; files
+    match exactly.
 
     If exclude_prefixes is provided, file-op lines (M/D/R/C) whose path falls
     under any prefix are dropped from the stream. This replaces the older
@@ -349,7 +367,8 @@ def filter_stream(
     have no common path prefix.
     """
     do_ref_rewrite = source_ref is not None and target_ref is not None
-    do_path_filter = bool(exclude_prefixes) or bool(exclude_basenames)
+    do_include_filter = bool(include_prefixes) or bool(include_files)
+    do_path_filter = do_include_filter or bool(exclude_prefixes) or bool(exclude_basenames)
     # We need byte-level control for data blocks, so work in binary mode.
     # But most lines are text. Strategy: read line by line in binary, decode
     # text lines as UTF-8, and handle data blocks as raw bytes.
@@ -544,10 +563,21 @@ def filter_stream(
             fileop = split_fileop_path_fields(stripped)
             if fileop is not None:
                 _op, paths = fileop
-                if do_path_filter and any(
-                    path_is_excluded(p, exclude_prefixes or [])
-                    or basename_is_excluded(p, exclude_basenames or [])
-                    for p in paths
+                if do_path_filter and (
+                    (
+                        do_include_filter
+                        and any(
+                            not path_is_included(
+                                p, include_prefixes or [], include_files or []
+                            )
+                            for p in paths
+                        )
+                    )
+                    or any(
+                        path_is_excluded(p, exclude_prefixes or [])
+                        or basename_is_excluded(p, exclude_basenames or [])
+                        for p in paths
+                    )
                 ):
                     # Skip emission entirely. Renames (R/C, only seen when
                     # fast-export ran WITHOUT --no-renames) are dropped if
@@ -614,6 +644,20 @@ def main():
         "Prints all unmapped emails to stderr and exits with code 1 if any found.",
     )
     parser.add_argument(
+        "--include-prefix",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Keep file operations at PATH or below it. Repeatable.",
+    )
+    parser.add_argument(
+        "--include-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Keep file operations for exactly PATH. Repeatable.",
+    )
+    parser.add_argument(
         "--exclude-path",
         action="append",
         default=[],
@@ -653,6 +697,10 @@ def main():
     ]
 
     exclude_basenames = [b for b in args.exclude_basename if b]
+    include_prefixes = [
+        normalize_exclude_prefix(raw) for raw in args.include_prefix if raw
+    ]
+    include_files = [raw.rstrip("/") for raw in args.include_file if raw]
 
     # Work in binary mode to handle data blocks correctly
     input_stream = sys.stdin.buffer
@@ -667,6 +715,8 @@ def main():
         collect_unmapped,
         exclude_prefixes,
         exclude_basenames,
+        include_prefixes,
+        include_files,
     )
 
     if collect_unmapped:

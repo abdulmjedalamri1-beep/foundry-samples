@@ -8,6 +8,7 @@ import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "sync-to-public.yml"
+TEST_SYNC_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test-sync.yml"
 WAIT_AND_MERGE = REPO_ROOT / ".github" / "scripts" / "wait-and-merge.sh"
 FORCE_FULL_SCRIPT = (
     REPO_ROOT / ".github" / "scripts" / "force-full-direct-push.sh"
@@ -46,6 +47,11 @@ if trigger_keys != ["workflow_dispatch"]:
 if re.search(r"\bforce_full\b|\bFORCE_FULL\b", workflow):
     fail("sync workflow still exposes force_full")
 
+if "additional_paths:" not in workflow:
+    fail("sync workflow does not expose additional_paths")
+if "assert-sync-scope.sh" not in workflow:
+    fail("sync workflow does not validate the generated path scope")
+
 if FORCE_FULL_SCRIPT.exists():
     fail("force-full-direct-push.sh still exists")
 
@@ -72,8 +78,27 @@ if min(create_pr, merge_pr, save_marks) < 0:
 if not create_pr < merge_pr < save_marks:
     fail("marks must be saved only after the public PR is created and merged")
 
+wait_and_merge_call = workflow[merge_pr:save_marks]
+for required_env in [
+    "SYNC_SCOPE_ASSERT_SCRIPT",
+    "SYNC_SCOPE_PUBLIC_REPO",
+    "SYNC_SCOPE_CONFIG",
+    "SYNC_ADDITIONAL_PATHS",
+]:
+    if required_env not in workflow:
+        fail(f"sync workflow does not pass {required_env} to the merge guard")
+
 wait_and_merge = WAIT_AND_MERGE.read_text(encoding="utf-8")
+test_sync_workflow = TEST_SYNC_WORKFLOW.read_text(encoding="utf-8")
+if ".github/scripts/assert-sync-scope.sh" not in test_sync_workflow:
+    fail("sync test workflow does not run when assert-sync-scope.sh changes")
 if "--squash" in wait_and_merge:
     fail("wait-and-merge still permits orphan-history squash fallback")
+if "assert-sync-scope.sh" not in wait_and_merge:
+    fail("wait-and-merge does not recheck the generated path scope")
+if "--match-head-commit" not in wait_and_merge:
+    fail("wait-and-merge does not bind the merge to the guarded PR head")
+if "baseRefName" not in wait_and_merge:
+    fail("wait-and-merge does not bind the merge to public main")
 
-print("PASS: sync workflow is manual-only and has no direct-main publish path")
+print("PASS: sync workflow is manual-only, scoped, and has no direct-main publish path")
