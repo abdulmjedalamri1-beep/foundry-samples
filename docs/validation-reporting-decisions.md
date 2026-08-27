@@ -3,10 +3,12 @@
 > **Status:** Design-locked 2026-05-14. Companion to `docs/validation-story-decisions.md` (the gate) — this doc covers the **reporting layer** that consumes the gate's signal.
 >
 > **Internal-only.** Lives under `docs/`, which is excluded from public sync.
+>
+> **Historical design context with transitional private implementation:** This reporting design consumes private `validation/*` statuses while P6 remains open. It is not the current public validation report or merge gate. See the public [daily validation cadence](https://github.com/microsoft-foundry/foundry-samples/blob/main/.github/validation-pilot.README.md), whose warm Live-service report is diagnostic and does not replace required `trusted`.
 
 ## Context
 
-The sync gate (`docs/validation-story-decisions.md` §8) posts per-sample GitHub commit statuses on every `push: main` in `microsoft-foundry/foundry-samples-pr`. Live state is one API call away (`gh api repos/.../commits/main/status`). Today the only "view" of that signal is the workflow-run summary on each sync run.
+Private validation reporters post per-sample GitHub commit statuses on `microsoft-foundry/foundry-samples-pr` commits, and the retained bridge consumes them as described in `docs/validation-story-decisions.md` §8. Live state is one API call away (`gh api repos/.../commits/main/status`). This design predates the current public daily report and remains relevant only to the P6 transition.
 
 This effort makes the gate's signal **visible at-a-glance**, **trendable over time**, and **routable to owning teams**.
 

@@ -1,8 +1,10 @@
 # Sample Validation Pipeline
 
-*Last updated: 2026-08-03*
+*Last updated: 2026-08-27*
 
 This directory contains the Azure DevOps pipeline configuration for validating code samples in this repository. The `validation.yml` pipeline is the repo-owned ADO validator registered as `ado-build` in [`docs/validation-results-contract.md`](../docs/validation-results-contract.md).
+
+> **Transitional private pipeline:** P6 retirement work is still open, so this ADO behavior remains operational and must not be deleted yet. Its statuses apply to private quality and an authorized bridge run only. They do not initiate publication or satisfy the public repository's required `trusted` check. Public authors should use the public [Build-readiness and Live-service validator](https://github.com/microsoft-foundry/foundry-samples/blob/main/.github/scripts/validate-sample.README.md).
 
 ## Overview
 
@@ -29,8 +31,8 @@ For full-validation runs (`validateAll=true` or scheduled), the `ChangedSamples`
 ## Pipeline Stages
 
 1. **DetectChanges** - Identifies which samples were modified by walking changed files up to the nearest `sample.yaml`, or enumerates all `sample.yaml` files for scheduled/manual full runs
-2. **Validate** - Runs language-specific L1-L3 validation jobs in parallel
-3. **Report** - Summarizes results, publishes artifacts, and prepares validation output for sync gating
+2. **Validate** - Runs the private ADO language-specific L1-L3 validation jobs in parallel
+3. **Report** - Summarizes results, publishes artifacts, and prepares private statuses for the retained bridge's transitional block-list
 
 ---
 
@@ -103,7 +105,7 @@ test: dotnet test --no-build
 | `validate` | Validation/lint command | Optional |
 | `test` | Test command | Optional |
 
-> **📖 Full spec:** For complete details on build readiness levels, sync gating, and the validation contract, see [`docs/validation-contract.md`](../docs/validation-contract.md). For the per-sample GitHub commit status contract used by sync gating, see [`docs/validation-results-contract.md`](../docs/validation-results-contract.md).
+> **Full private spec:** For the transitional private ADO levels and bridge-time filter, see [`docs/validation-contract.md`](../docs/validation-contract.md). For private per-sample GitHub status posting, see [`docs/validation-results-contract.md`](../docs/validation-results-contract.md).
 
 **Behavior:**
 - If **any** of `build`, `validate`, or `test` are specified, those commands are run and default validation is skipped
@@ -134,6 +136,7 @@ The check is implemented by `.azure-pipelines/scripts/check-hosted-agent-python-
 
 ## See also
 
-- [`docs/validation-contract.md`](../docs/validation-contract.md) — Build readiness levels (L1–L3), the `sample.yaml` contract, and sync-gating semantics.
-- [`docs/validation-results-contract.md`](../docs/validation-results-contract.md) — Per-sample GitHub commit status contract that this pipeline produces (as the `ado-build` provider) and that the sync gate consumes.
-- [`docs/repo-sync-automation.md`](../docs/repo-sync-automation.md) — How validation statuses feed the private → public sync gate.
+- [`docs/validation-contract.md`](../docs/validation-contract.md) — Transitional private ADO levels, the `sample.yaml` contract, and bridge-time status filtering.
+- [`docs/validation-results-contract.md`](../docs/validation-results-contract.md) — Private per-sample GitHub status contract produced by `ado-build`.
+- [`docs/repo-sync-automation.md`](../docs/repo-sync-automation.md) — How an authorized bridge run consumes private validation statuses.
+- [Public per-sample validation contract](https://github.com/microsoft-foundry/foundry-samples/blob/main/.github/scripts/validate-sample.README.md) — Current public Build-readiness and Live-service behavior.

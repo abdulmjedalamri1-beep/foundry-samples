@@ -3,7 +3,7 @@
 > **Last updated:** 2026-08-25 — aligned private routing with the public-default contribution model.
 
 > [!IMPORTANT]
-> This private repository is for internal work that is not intended for publication. Publication work belongs in the public [`microsoft-foundry/foundry-samples`](https://github.com/microsoft-foundry/foundry-samples) repository.
+> This private repository is for internal work that is not intended for publication. Publication work belongs in the public [`microsoft-foundry/foundry-samples`](https://github.com/microsoft-foundry/foundry-samples) repository and follows its [contribution guide](https://github.com/microsoft-foundry/foundry-samples/blob/main/CONTRIBUTING.md).
 >
 > Merging a change here does not automatically publish it. Authorized maintainers retain a manual, operator-only bridge for an explicitly approved private-main publication batch. The bridge opens a public pull request and merges it only after required public checks pass and repository rules permit the merge. Contributors must not invoke the bridge or treat it as an alternative publication route.
 
@@ -99,7 +99,7 @@ Team Maintainers own membership. Add members through the team's GitHub page and 
 
 1. Search the [open private pull requests](https://github.com/microsoft-foundry/foundry-samples-pr/pulls) for related work.
 2. Confirm that the work is internal and not intended for publication.
-3. For work intended for publication, use the public [`microsoft-foundry/foundry-samples`](https://github.com/microsoft-foundry/foundry-samples) repository instead.
+3. For work intended for publication, use the public [`microsoft-foundry/foundry-samples`](https://github.com/microsoft-foundry/foundry-samples) repository instead. If you cannot create a public branch, contact a repository owner; private access and the retained bridge are not fallback publication routes.
 
 ### Set up your environment
 
@@ -156,7 +156,7 @@ Private pull requests and their checks are for internal repository quality only.
 
 ## Internal validation
 
-This repository can run internal validation for samples and tooling. Internal validation does not initiate publication. When an authorized maintainer runs the retained bridge, applicable validation results can determine which content is eligible for that run.
+This repository can run internal validation for samples and tooling. Internal validation does not initiate publication or authorize bridge use. For a separately approved operator dispatch, applicable private validation results can determine which content that run holds back.
 
 ### Validation paths
 
@@ -188,6 +188,8 @@ description: A brief description of what this sample demonstrates
 ```
 
 The pipeline applies language defaults and supports custom `build`, `validate`, and `test` commands. See the [Validation Pipeline README](.azure-pipelines/README.md) for the schema and directory conventions.
+
+Public pull requests use the public repository's required `trusted` check and current [Build-readiness and Live-service contract](https://github.com/microsoft-foundry/foundry-samples/blob/main/.github/scripts/validate-sample.README.md). The numbered levels below describe only the still-live private ADO pipeline while P6 retirement remains pending.
 
 #### Reference validation commands
 

@@ -1,178 +1,37 @@
-# External Partner Contributions
+# External Partner Contributions (Historical)
 
-This document defines the interaction model for allowing external partners to contribute code samples to `foundry-samples-pr` and have them published to the public `foundry-samples` repository.
+> **Historical internal record:** This page preserves the partner ownership and service model used before public-default contribution routing was finalized on 2026-08-27. It is not an onboarding guide or a publication path.
 
-## Contribution Model
+External and partner changes intended for publication now follow the public [`microsoft-foundry/foundry-samples` contribution policy](https://github.com/microsoft-foundry/foundry-samples/blob/main/CONTRIBUTING.md). The required public merge gate is `trusted`. A contributor who cannot create a public branch must contact a repository owner; do not grant private access or use the retained bridge as a workaround.
 
-External partner contributions follow a **white-glove, curated** model — not open contribution. Partners are onboarded through an explicit process with a named DRI (directly responsible individual) on the Microsoft side.
+Private `foundry-samples-pr` access, private validation, and private CODEOWNERS routing are for internal-only work. A private merge does not publish. The retained bridge is an operator-only mechanism for an explicitly approved private-main batch, not an external-contribution route.
 
-### Why not open contribution?
+## Durable governance history
 
-- Samples carry the **Azure brand** — quality failures reflect on the platform, not the partner
-- Validation checks **build readiness** and reported live-resource validation; functional correctness still needs an owner
-- Partners may not have Azure subscriptions, tooling access, or familiarity with our CI system
-- Ongoing maintenance burden falls on internal teams when partners don't respond
+The former white-glove model established useful ownership expectations that still apply when a maintainer sponsors partner content in a public pull request:
 
-## Roles and Responsibilities
+| Role | Durable responsibility |
+|------|------------------------|
+| **Foundry DevX Engineering** | Repository infrastructure and best-effort Build-readiness diagnosis |
+| **Feature-team DRI** | Functional correctness, partner relationship, escalation, and any sample-owned Live-service validation |
+| **External partner** | Sample code, dependency currency, and timely response to functional issues |
 
-| Role | Owns | Examples |
-|------|------|----------|
-| **DevX Engineering** | Repo infrastructure, central validation pipeline, sync process, best-effort build fixes | Fixing a broken `requirements.txt`, updating pipeline config |
-| **Feature team DRI** | Functional correctness, partner relationship, escalation handling, team-owned validation if applicable | Verifying a Mistral sample works against the Mistral API; owning a live-resource E2E pipeline |
-| **External partner** | Sample code, timely response to issues, keeping code current | Responding to "your sample broke" within SLA |
+- Every partner area needs a named Microsoft DRI.
+- Build-readiness success does not prove functional correctness against a live service.
+- Sample-owned Live-service checks remain the owning team's responsibility.
+- Historically, partner teams used a four-business-day response target before maintainers considered removing broken public content. Removal now requires a normal reviewed public pull request; deleting or relocating private content does not automatically change public content.
+- Historical partner comments in private [CODEOWNERS](../.github/CODEOWNERS) are internal routing evidence only. Current public ownership belongs in the public repository's [CODEOWNERS](https://github.com/microsoft-foundry/foundry-samples/blob/main/.github/CODEOWNERS).
 
-### Ownership boundaries
+## Current validation references
 
-- DevX will **fix build breaks** (Level 2–3 failures) on a best-effort basis
-- DevX will **not fix functional bugs** — those go to the DRI → partner
-- Team-owned validation pipelines are first-class, but the owning team is responsible for keeping those results current and actionable
-- If a partner sample repeatedly fails, DevX will escalate, then remove from sync after SLA expires
+- [Public per-sample validation contract](https://github.com/microsoft-foundry/foundry-samples/blob/main/.github/scripts/validate-sample.README.md) - current Build-readiness and Live-service commands and behavior
+- [Public daily validation cadence](https://github.com/microsoft-foundry/foundry-samples/blob/main/.github/validation-pilot.README.md) - warm-project fleet validation and reporting
+- [Private validation contract](validation-contract.md) - transitional private ADO and bridge-time behavior pending P6
 
-## Onboarding a Partner
-
-1. **Identify a DRI** on the Microsoft side and agree on a validation path (central pipeline, team-owned, or both)
-2. **Grant repo access** — partners cannot join the `microsoft-foundry` org and cannot be added to GitHub teams; outside collaborator is the only path:
-   - Go to the [foundry-samples-pr page on the Open Source Portal](https://repos.opensource.microsoft.com/orgs/microsoft-foundry/repos/foundry-samples-pr), click **Elevate to Administrator**, then use GitHub **Settings → Collaborators and teams → Add people** (Write access)
-3. **Open a PR** adding a CODEOWNERS entry for the partner's sample path(s) pointing to the DRI's GitHub handle, with a comment line capturing the partner name, onboard date, and escalation contact (see the partner section in [`.github/CODEOWNERS`](../.github/CODEOWNERS) for the format)
-4. **After the invite is accepted**, share links to [CONTRIBUTING.md](../CONTRIBUTING.md) and this doc with the partner — links will 404 until they accept
-5. **Partner submits PR** — same structure as internal samples; DRI reviews for correctness, DevX reviews for CI/structure compatibility; merge triggers the normal validation + sync flow
-
-### What partners must provide
-
-- A `README.md` for the sample explaining prerequisites and usage
-- A point of contact for escalations (email or GitHub handle)
-- Validation coverage through one or both supported paths:
-  - `sample.yaml` meeting the [Validation Contract](validation-contract.md), if using the central ADO pipeline
-  - A team-owned pipeline that posts GitHub commit statuses per the [Validation Results Contract](validation-results-contract.md), if bringing your own validation
-
-## Validation Requirements
-
-Partner samples can use more than one validation path. The bar is not lowered; the choice is **who runs the pipeline**, not whether quality matters.
-
-Validation gates sync. A partner-contributed sample is held back from public sync until its reporting pipeline posts a non-failing status for that sample on the `main` HEAD commit that sync evaluates. The grandfather rule applies only to samples with **no** reporting pipeline. Once a team opts in by reporting under `validation/<pipeline-id>/<sample-path>`, that sample is tracked by that pipeline and its status is load-bearing.
-
-See the [Validation Contract](validation-contract.md) for validation levels and sync-gating semantics. See the [Validation Results Contract](validation-results-contract.md) for the status-posting contract, pipeline registry, and onboarding convention.
-
-### Two valid validation paths
-
-| Path | Who runs it | How a sample opts in | What it reports | Best fit |
-|------|-------------|----------------------|-----------------|----------|
-| **A. Use the central pipeline** | DevX Engineering ADO validation | Add `sample.yaml` in the sample directory | `validation/ado-build/<sample-path>` with L1-L3 status | Path of least resistance for ordinary build/load validation |
-| **B. Bring your own pipeline** | Owning feature team / partner team infrastructure | Define the pipeline's tracked set and post statuses per `docs/validation-results-contract.md` | `validation/<pipeline-id>/<sample-path>` with the team's validation result | Live-resource, service-specific, or Level 4 validation |
-
-#### Path A: central pipeline
-
-Add a `sample.yaml` file in the sample directory. The ADO `validation.yml` pipeline discovers sample directories containing `sample.yaml`, validates build readiness through Level 3 (Load), and reports per-sample GitHub commit statuses using pipeline id `ado-build`:
-
-```text
-validation/ado-build/<sample-path>
-```
-
-This is the default path for most partner samples. It proves that the sample parses, dependencies resolve, and the code loads or builds successfully according to the [Validation Contract](validation-contract.md).
-
-#### Path B: team-owned pipeline
-
-Feature teams may run validation in their own infrastructure: GitHub Actions, Azure DevOps, or another internal system with permission to post commit statuses to `microsoft-foundry/foundry-samples-pr`.
-
-The pipeline must post per-sample GitHub commit statuses following the [Validation Results Contract](validation-results-contract.md):
-
-```text
-validation/<pipeline-id>/<sample-path>
-```
-
-This is how a team can add Level 4 (Run) coverage: provision real Azure resources, deploy the sample, and exercise it end-to-end. Level 4 is additive; it does not lower or replace the Level 3 floor.
-
-### Hosted Agents canary
-
-Hosted Agents is the canary shape for team-owned validation. `.github/workflows/hosted-agents-cloud-e2e.yml` discovers Hosted Agents samples, uses federated-OIDC Azure login, runs `azd provision` / `azd deploy` against real Azure resources when configured, and invokes the deployed agent. Per-sample commit-status posting under the External Validation Contract is rolling out via D5 (see `docs/validation-story-decisions.md` §9): an initial single-sample canary on `samples/python/hosted-agents/agent-framework/responses/01-basic`, widened to the full HA matrix after the gate honors a deliberately-failed status end-to-end.
-
-Its status namespace is:
-
-```text
-validation/hosted-agents-e2e/<sample-path>
-```
-
-Use Hosted Agents as the reference model for any team that wants live-resource validation: own the tracked set, run the infrastructure you need, and post durable per-sample statuses on `main` commits.
-
-### Onboarding a team-owned validation pipeline
-
-Onboarding is intentionally lightweight:
-
-1. Pick a stable `pipeline-id`.
-2. Open a doc PR adding the pipeline to the registry in [Validation Results Contract](validation-results-contract.md).
-3. Start posting statuses under `validation/<pipeline-id>/<sample-path>`.
-
-No central repo-code change is required for v1 registration. The sync gate honors well-formed validation statuses on the target SHA.
-
-### What validation checks
-
-The central pipeline validates **build readiness level 3 (load)**: it confirms that the sample code parses, dependencies resolve, and the code loads without error. It does **not** execute the sample against live endpoints or verify functional correctness.
-
-Team-owned pipelines may add service-specific checks, including **Level 4 (run)** validation against live resources. Those pipelines own their criteria and must make failures actionable through `target_url` evidence in the posted status.
-
-### Common partner issues
-
-| Issue | Resolution |
-|-------|-----------|
-| Missing `requirements.txt` / `package.json` | Partner must add dependency manifest |
-| Missing `sample.yaml` for Path A | Partner must add `sample.yaml`, or DRI must onboard a Path B reporter |
-| Team-owned pipeline does not post status on `main` HEAD | Owning team must fix status publishing before the sample can sync reliably |
-| Hardcoded paths or credentials | Partner must use env vars or config files |
-| Imports from unpublished packages | Partner must use publicly available packages |
-| Sample only works on specific OS | Document requirement; CI runs Linux unless the owning pipeline documents another environment |
-
-## Escalation and SLA
-
-### 4 Business Day SLA
-
-When a partner sample fails validation (scheduled or on push):
-
-1. **Day 0**: Failure detected. DevX determines if it's a build issue (our fix) or functional issue (partner fix).
-2. **Day 0–1**: If partner fix needed, DRI notifies partner with details.
-3. **Day 4**: If no response or fix, the sample is **removed from sync** — DevX deletes the sample from private `main` (or moves it out of synced paths), so the next sync run propagates the removal to public. The sample's history remains in private repo.
-4. **Reinstatement**: Partner can re-enable by fixing the issue and contacting the DRI; the sample is restored via PR.
-
-> Note: "Removed from sync" is a content action (deletion or relocation), not a manifest flip. Validation statuses can hold a sample back from sync while it is failing; permanent removal still requires deleting or relocating the sample. See [Repo Sync Automation](repo-sync-automation.md) for sync mechanics.
-
-### Escalation path
-
-```
-Validation failure detected
-  → DevX triages (build vs. functional)
-    → Build issue: DevX fixes (best-effort)
-    → Functional issue:
-      → DRI notifies partner (Day 0)
-      → No response by Day 4: remove from sync
-      → Partner responds: normal PR flow to fix
-```
-
-## Removing a Partner Sample
-
-Samples are removed from public sync when:
-
-1. Partner is unresponsive past SLA on a functional failure
-2. Partner explicitly requests removal
-3. The underlying API or service is deprecated
-4. Repeated build failures with no maintainer engagement
-
-Removal is a **content action**: DevX deletes the sample from private `main` (or relocates it to an excluded path like `internal/archive/`). The next sync run propagates the deletion to public. The sample's full history remains in the private repo and can be reinstated via PR.
-
-## Active Partners
-
-See the partner entries in [`.github/CODEOWNERS`](../.github/CODEOWNERS) — each entry includes the DRI, onboard date, and escalation contact as a comment above the path rule.
-
-## Changelog
+## Historical changes
 
 | Date | Change |
 |------|--------|
-| 2026-06-22 | Simplified onboarding process; replaced partner-registry.yaml with Active Partners table; issue template removed. |
-| 2026-04-29 | Validation framing updated to admit team-owned pipelines as a first-class category. See `docs/validation-story-decisions.md`. |
-
-## Related Documents
-
-- [Validation Story — Phase B Decisions](validation-story-decisions.md) — Locked validation and sync-gating decisions
-- [Validation Contract](validation-contract.md) — Validation levels, `sample.yaml`, tracked vs. untracked samples, and sync-gating semantics
-- [Validation Results Contract](validation-results-contract.md) — Pipeline registry and GitHub commit status posting convention for central and team-owned pipelines
-- [Repo Sync Automation](repo-sync-automation.md) — How validated samples reach the public repo
-- [CONTRIBUTING.md](../CONTRIBUTING.md) — Contributor guide (applies equally to partners)
-- [Pipeline README](../.azure-pipelines/README.md) — Operational details of the central ADO validation pipeline
+| 2026-08-27 | Retired private partner onboarding and automatic-sync guidance; public contribution policy is authoritative. |
+| 2026-06-22 | Simplified the former private onboarding process and retained partner ownership in CODEOWNERS comments. |
+| 2026-04-29 | Added team-owned validation as a first-class category in the former sync-gating model. |

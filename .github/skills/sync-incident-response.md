@@ -3,6 +3,8 @@
 Authoritative playbook for diagnosing and recovering from failures in the operator-run private-to-public bridge.
 Read this file completely before taking any action when a sync run fails.
 
+Only an explicitly authorized bridge operator may dispatch, retry, override validation, or initiate seed recovery. Coding agents may diagnose and prepare commands, but must not execute an operation without explicit authorization for that action.
+
 ## 1. Get the failure log
 
 ```bash
@@ -13,7 +15,7 @@ gh run view <run-id> --repo microsoft-foundry/foundry-samples-pr
 gh run view <run-id> --repo microsoft-foundry/foundry-samples-pr --log > /tmp/sync-run.log
 ```
 
-The failing step is almost always **"Run sync pipeline"** which calls `sync-core.sh`.
+The failing step is often **"Run sync pipeline"**, which calls `sync-core.sh`; scope checks, public checks, the pre-merge guard, and merge polling can also fail later.
 Mirror-back is public-owned automation; check its failures separately via the
 `mirror-back` workflow in the `microsoft-foundry/foundry-samples` Actions tab.
 
@@ -297,3 +299,11 @@ If it somehow recurs:
 | `.github/sync-config.json` | Default positive scope, reserved paths, and public repo target |
 | `docs/repo-sync-automation.md` | Authoritative design doc — scope, guards, marks cache, recovery inputs, and troubleshooting |
 | `docs/sync-cutover-runbook.md` | Historical one-time surgery record (not for routine incidents) |
+
+## 9. Evidence, cleanup, and escalation
+
+Before closing an incident, record the private run URL and actor, private and public anchor SHAs, resolved scope, generated branch, public PR when present, both scope-guard outcomes, merge result, and any validation override reason.
+
+- Delete inspected `sync/dry-run-*` branches; dry runs do not create PRs or update marks.
+- Close failed or timed-out public sync PRs only after retaining their logs and identifying whether a newer run supersedes them. A subsequent normal run automatically closes stale sync PRs.
+- Escalate any unexpected reserved-path diff, real private/public divergence, failed tree-equivalence check, public ruleset change, or unexplained marks mutation to the Foundry DevX bridge operators. Stop rather than broadening scope, bypassing `trusted`, adding the App as a ruleset bypass actor, or reintroducing full export/direct-main recovery.

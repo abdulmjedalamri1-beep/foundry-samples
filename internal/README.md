@@ -1,6 +1,6 @@
 # Internal Directory
 
-This directory contains internal-only test support and tooling for the **private** `foundry-samples-pr` repository. Nothing under `internal/` is ever synced to the public `foundry-samples` repository.
+This directory contains internal-only test support and tooling for the **private** `foundry-samples-pr` repository. It is outside the bridge's default positive scope and must not be supplied through `additional_paths`.
 
 ## Purpose
 
@@ -10,17 +10,18 @@ This directory contains internal-only test support and tooling for the **private
 - **Hosted-agent test specs and legacy payloads** consumed by the cloud E2E pipeline (`tools/samples-hosted-agents/`)
 - **VoiceLive audio smoke test** consumed by the cloud E2E pipeline (`tools/voicelive-e2e/`)
 
-## Sync Behavior
+## Bridge Behavior
 
-The sync flow is **private → public**, not the other way around. `foundry-samples-pr` is the upstream authoritative repo where authors push, validation runs, and internal content lives. `foundry-samples` is the downstream public repo that customers read.
+The public `foundry-samples` repository is the normal route for publication. This private repository remains authoritative only for internal work. A private merge does not publish.
 
 ```text
-foundry-samples-pr (private)  ──── daily + on-merge sync ────►  foundry-samples (public)
+foundry-samples-pr (private)  ── authorized manual bridge ──►  public pull request
 ```
 
-- **Daily sync** runs at 06:00 UTC via `.github/workflows/sync-to-public.yml` and uses `git fast-export` / `git fast-import` to push private `main` to public `main`, with path filtering and author rewriting.
-- **Mirror-back** is the inverse direction and is **not** a bulk content sync: `.github/workflows/mirror-back.yml` opens a per-commit review PR back to private whenever a non-sync-App commit lands directly on public `main`. This is a backstop for hand-edits made directly in the public repo, not the primary sync direction.
-- **`internal/` is statically excluded** from the private → public sync. Anything under this directory is guaranteed to stay private.
+- The retained bridge runs only through an explicitly authorized `workflow_dispatch`.
+- Its default positive scope is `infrastructure/**` and `samples/**`; `internal/**` is outside that scope.
+- A valid one-run `additional_paths` value can authorize a specific non-reserved file or directory, including under a normally private tree. Do not treat path location alone as a security boundary.
+- The bridge opens a public pull request, waits for public rules, repeats its scope guard, and rebase-merges as the ruleset-bound App.
 
 For the full mechanics — sync gate, validation status interpretation, fast-export filtering, author rewriting, App-authenticated PR creation, wait-and-merge, drift verification — see [`docs/repo-sync-automation.md`](../docs/repo-sync-automation.md).
 
@@ -38,11 +39,7 @@ Re-run `git ls-tree --name-only HEAD internal/` to refresh this listing if it fa
 
 ## Sync Configuration
 
-Static path exclusions and the public-repo target are defined in [`.github/sync-config.json`](../.github/sync-config.json). The exclusion list is the `exclude_pathspecs` array (note: `pathspecs`, plural, and these are git pathspecs starting with `:!`, not plain path strings). To exclude an additional path from the public sync, add a `":!<path>/"` entry to that array.
-
-The set excluded today: `internal/`, `docs/`, `.azure-pipelines/`, `.github/`, `CONTRIBUTING.md`, `README.md`, `public-overlay/`.
-
-> **Do not** put temporary validation holds in `exclude_pathspecs`. The sync gate computes per-run dynamic exclusions for samples that fail or are pending validation — see [`docs/validation-contract.md`](../docs/validation-contract.md) and [`docs/repo-sync-automation.md`](../docs/repo-sync-automation.md).
+The durable default positive scope and public-repository target are defined in [`.github/sync-config.json`](../.github/sync-config.json). Do not use legacy `exclude_pathspecs` as publication policy. Reserved public metadata (`README.md`, `CONTRIBUTING.md`, `.github/**`, and `public-overlay/**`) cannot be authorized through `additional_paths`.
 
 ## Sync Workflow Secrets
 
@@ -53,11 +50,11 @@ The private → public sync runs as a GitHub App (`foundry-samples-repo-sync`) i
 | `SYNC_APP_ID` | GitHub App ID |
 | `SYNC_APP_PRIVATE_KEY` | App private key (PEM) |
 
-App permissions: Contents (Read & Write), Pull Requests (Read & Write), Statuses (Read), Issues (Write — for bypass-log comments).
+The public-scoped App token needs contents and pull-request write access. Private workflow permissions provide status read and bypass-log issue comments. The App is not a public `main` ruleset bypass actor.
 
 ## Manual Sync Triggers
 
-`.github/workflows/sync-to-public.yml` supports manual dispatch from the Actions tab with inputs for dry-run, full re-export, marks-cache reseeding, and per-sample / full validation-gate bypass. See the workflow file for the complete input list and [`docs/repo-sync-automation.md`](../docs/repo-sync-automation.md) for when each is appropriate.
+`.github/workflows/sync-to-public.yml` supports authorized manual dispatch with `dry_run`, `additional_paths`, verified seed-recovery inputs, and validation override inputs. It has no full re-export or direct-public-main mode. Always start recovery with `dry_run=true`; see [`docs/repo-sync-automation.md`](../docs/repo-sync-automation.md).
 
 ---
 
@@ -71,6 +68,6 @@ App permissions: Contents (Read & Write), Pull Requests (Read & Write), Statuses
 
 ### What Does NOT Belong Here
 
-- ❌ Customer-facing samples (those go in `samples/`, `samples-classic/`, `samples-mistral/`)
-- ❌ Public documentation (`README.md`, `CONTRIBUTING.md`, anything under `docs/`)
+- ❌ Customer-facing samples (author those in public `microsoft-foundry/foundry-samples`)
+- ❌ Public documentation (maintain it through a normal public pull request)
 - ❌ Symlinks or imports from `internal/` into public content — they would break after sync

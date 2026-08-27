@@ -3,6 +3,8 @@
 > **Status:** Decided 2026-04-29. This document supersedes the "Validation Results Manifest: Decided Against" and "Sync Gating: Decided Against" sections of `docs/validation-contract.md` and `docs/repo-sync-automation.md`. Those sections will be revised in Phase C with dated changelog entries pointing to this document.
 >
 > **Internal-only.** Lives under `docs/`, which is excluded from public sync.
+>
+> **Historical design context with transitional private implementation:** Numbered levels and status-gated sync below describe the private ADO/bridge design that remains operational only until P6 retirement. They do not define normal public contribution or the public required `trusted` gate. Current public validation uses [Build readiness and Live-service validation](https://github.com/microsoft-foundry/foundry-samples/blob/main/.github/scripts/validate-sample.README.md).
 
 ## Changelog
 
@@ -16,9 +18,9 @@
 | 2026-05-05 | D5 design lock (§9): Hosted Agents canary. `hosted-agents-cloud-e2e.yml` becomes the second status reporter and the POC of the External Validation Contract for an externally-owned pipeline. Single-sample canary on `samples/python/hosted-agents/agent-framework/responses/01-basic`; widen after gate dry-run. Implementation ticket: 5237808. |
 | 2026-06-10 | **No validation-direction changes from 2026-06-09 → 2026-06-10 sync saga.** The saga (PRs [microsoft-foundry/foundry-samples-pr#493](https://github.com/microsoft-foundry/foundry-samples-pr/pull/493), [#499](https://github.com/microsoft-foundry/foundry-samples-pr/pull/499), [#513](https://github.com/microsoft-foundry/foundry-samples-pr/pull/513), [#515](https://github.com/microsoft-foundry/foundry-samples-pr/pull/515), [#518](https://github.com/microsoft-foundry/foundry-samples-pr/pull/518)) touched sync mechanics (protected-paths guard, exclude-path filtering, orphan-wipe recovery) only — gate semantics, status-context contract, and the D4/D5 design locks are unchanged. Recovery playbook lives in [`foundry-devx-eng-docs/operations/sync-recovery-runbook.md`](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md). Entry recorded to close the loop on doc currency. |
 
-## North Star
+## Historical private bridge North Star
 
-**Validation gates sync.** A change to a sample in `foundry-samples-pr` is not eligible for the next sync to `foundry-samples` (public) unless it has passed validation. The purpose is to keep an incredibly high quality bar for samples shown to the public.
+**Private validation gates retained-bridge eligibility.** This 2026-04-29 decision remains implemented in the private bridge until P6 retirement; it does not govern normal public pull requests or replace the public `trusted` check.
 
 ## Implementation Principle
 

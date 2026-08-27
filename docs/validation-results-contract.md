@@ -5,18 +5,20 @@
 > **Internal-only.** This file lives under `docs/`, which is excluded from public sync by `.github/sync-config.json`.
 >
 > **Source of truth for decisions:** `docs/validation-story-decisions.md`. If this document appears to disagree with that file, the decisions file wins and this file should be corrected.
+>
+> **P6 transition:** This remains the private status-posting contract for the live ADO and team-owned reporters consumed by an authorized bridge run. It does not define normal public publication or the public required merge gate. Public pull requests require `trusted`; current public validation uses [Build readiness and Live-service validation](https://github.com/microsoft-foundry/foundry-samples/blob/main/.github/scripts/validate-sample.README.md).
 
 ## Purpose & audience
 
-This is the technical contract for posting validation results that participate in sync gating for `microsoft-foundry/foundry-samples-pr`.
+This is the technical contract for posting private validation results that participate in the retained bridge's transitional block-list for `microsoft-foundry/foundry-samples-pr`.
 
 Audience:
 
 - DevX Engineering, for the repo-owned ADO validation pipeline.
-- Partner or feature teams that own their own validation pipeline.
+- Internal feature teams that own their own validation pipeline.
 - Anyone implementing the sync gate or debugging why a sample did or did not sync.
 
-The goal is simple: any pipeline can validate the samples it owns, publish durable per-sample results to GitHub commit statuses, and have the sync gate honor those results without a central manifest service or a repo-code change for every new team.
+The goal is simple: an internal pipeline can validate the samples it owns, publish durable per-sample results to private GitHub commit statuses, and have an authorized bridge run honor those results without a central manifest service.
 
 This document is about **how to post results**. The validation levels, sample metadata expectations, and repo-wide validation story live in `docs/validation-contract.md` and `docs/validation-story-decisions.md`.
 
@@ -153,7 +155,7 @@ Registered tracked sets today:
 Notes:
 
 - Unreported samples are grandfathered in v1. They sync unless some other status context reports a blocking result for their path.
-- A directory does not need `sample.yaml` to be gated by an external pipeline. `sample.yaml` is the ADO pipeline's discovery mechanism, not the only way to participate in gating.
+- A directory does not need `sample.yaml` to be gated by a team-owned internal pipeline. `sample.yaml` is the ADO pipeline's discovery mechanism, not the only way to participate in the private bridge filter.
 - A pipeline may report only the samples it actually ran. For example, PR-time runs can report changed samples only; `push: main` and scheduled runs are what keep `main` HEAD fresh.
 
 ## Pipeline registry

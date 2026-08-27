@@ -1,6 +1,8 @@
 # Validation Contract
 
-This document defines what validation means in `foundry-samples-pr` and how validation controls eligibility for sync to the public `foundry-samples` repo.
+> **Transitional private contract:** This document describes the still-live private ADO validator and the retained bridge's private-status filter while P6 retirement remains pending. It is not the public contribution or merge contract. Public pull requests require the `trusted` check and use the public [Build-readiness and Live-service contract](https://github.com/microsoft-foundry/foundry-samples/blob/main/.github/scripts/validate-sample.README.md).
+
+This document defines what private validation means in `foundry-samples-pr` and how those results can hold content back during a separately authorized bridge run.
 
 It governs two contracts:
 
@@ -9,15 +11,15 @@ It governs two contracts:
 
 The posting mechanics for external validation pipelines live in [Validation Results Contract](validation-results-contract.md). The sync workflow internals live in [Repo Sync Automation](repo-sync-automation.md).
 
-## North Star
+## Transitional bridge rule
 
-> **Validation gates sync.** A change to a sample in `foundry-samples-pr` is not eligible for the next sync to `foundry-samples` (public) unless it has passed validation. The purpose is to keep an incredibly high quality bar for samples shown to the public.
+> **Private statuses filter an authorized bridge run.** They do not initiate publication, authorize an operator dispatch, or satisfy the public `trusted` gate.
 
 This is the locked direction from [Validation Story — Phase B Decisions](validation-story-decisions.md). That decision supersedes the earlier "manifest decided against" and "sync gating decided against" text.
 
-## Build Readiness Levels
+## Private ADO build-readiness levels
 
-Validation measures **build readiness** — can a customer clone the sample, prepare it, and get past code/load failures? Levels are cumulative.
+The private ADO pipeline uses cumulative numbered levels. This terminology remains only for that live transitional contract; current public documentation uses **Build readiness** and **Live-service validation**.
 
 | Level | Name | What it proves | Example |
 |-------|------|----------------|---------|
@@ -28,7 +30,7 @@ Validation measures **build readiness** — can a customer clone the sample, pre
 
 **Level 3 (Load) remains the floor for tracked samples.** A tracked sample that does not demonstrate load-readiness is not eligible for sync.
 
-**Level 4 (Run) is opt-in and additive.** It covers live Azure resources, deployed services, federated identity / OIDC, and end-to-end checks that cannot be expressed as ordinary build/load validation. Hosted Agents cloud E2E is the canary for this tier. L4 never replaces L3; it augments L3 for samples whose owning pipeline reports L4 status.
+**Level 4 (Run), now called Live-service validation in the public contract, is opt-in and additive.** It covers live Azure resources, deployed services, federated identity / OIDC, and end-to-end checks that cannot be expressed as ordinary build/load validation. It never replaces private Level 3; it augments private bridge-time evidence for samples whose owning pipeline reports it.
 
 ### Tier promotion is implicit
 
@@ -46,7 +48,7 @@ The sync gate does not need to understand the level number. It honors reported v
 
 `sample.yaml` is the contract used by the ADO sample validation pipeline (`.azure-pipelines/validation.yml`). It gives the pipeline a sample root, metadata, and optional custom commands.
 
-`sample.yaml` is **one path** to being tracked by validation. It is not the only path. External pipelines can track samples through their own manifests and status reporters. For example, Hosted Agents uses `agent.manifest.yaml` and reports through its own cloud E2E workflow. Those tracking-set definitions belong in [Validation Results Contract](validation-results-contract.md).
+`sample.yaml` is **one path** to being tracked by private validation. It is not the only path. Team-owned internal pipelines can track samples through their own manifests and status reporters. For example, Hosted Agents uses `agent.manifest.yaml` and reports through its own cloud E2E workflow. Those tracking-set definitions belong in [Validation Results Contract](validation-results-contract.md).
 
 ### Schema
 
@@ -100,9 +102,9 @@ For samples that specify custom validation, use these patterns:
 | TypeScript | `npm install` | `npx tsc --noEmit` | Type-checks all imports |
 | JavaScript | `npm install` | `node -e "require('./sample')"` | Deps resolve, code loads |
 
-## The Gate Contract
+## The transitional bridge filter contract
 
-The sync gate is a **per-sample block-list** driven by GitHub commit statuses on `main` commits in `microsoft-foundry/foundry-samples-pr`.
+The retained bridge uses a **per-sample block-list** driven by GitHub commit statuses on `main` commits in `microsoft-foundry/foundry-samples-pr`. This is separate from the public pull request's required `trusted` check.
 
 Default = sync. A sample is blocked iff it has at least one reported validation status with state `failure`, `error`, or `pending` at the private `main` SHA being synced. Passing samples and untracked samples continue through the sync, subject to normal path exclusions.
 
@@ -126,14 +128,14 @@ Where:
 
 ### State semantics
 
-| GitHub status state | Sync behavior for that sample |
+| Private GitHub status state | Authorized bridge behavior for that sample |
 |---------------------|-------------------------------|
 | `success` | Does not block sync. |
 | `failure` | Blocks sync. |
 | `error` | Blocks sync. |
 | `pending` | Blocks sync; do not publish while validation is still running. |
 
-Statuses live on private-repo SHAs. They do not propagate to public commits after fast-export / author rewriting / import, and they do not need to. The gate is evaluated before public sync.
+Statuses live on private-repo SHAs. They do not propagate to public commits after fast-export / author rewriting / import and do not control normal public pull requests. The filter is evaluated only during an authorized bridge run.
 
 ## Tracked vs Untracked
 
@@ -181,7 +183,7 @@ It does **not** define:
 
 ## Implementation Status
 
-> **Last updated:** 2026-08-03 for the Python Hosted Agent dependency-policy ratchet.
+> **Last updated:** 2026-08-27 for public-default routing and the P6 transition boundary.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -204,6 +206,8 @@ It does **not** define:
 - [Validation Story — Phase B Decisions](validation-story-decisions.md) — Locked decisions that supersede earlier validation/sync-gating text.
 - [Validation Results Contract](validation-results-contract.md) — Pipeline registry, status posting convention, credentials, retry semantics, and tracking-set definitions.
 - [Repo Sync Automation](repo-sync-automation.md) — How the manually dispatched sync from private to public works.
-- [External Contributions](external-contributions.md) — Partner contribution model and SLAs.
+- [External Contributions](external-contributions.md) — Historical private partner-governance record and current public pointer.
+- [Public per-sample validation contract](https://github.com/microsoft-foundry/foundry-samples/blob/main/.github/scripts/validate-sample.README.md) — Current Build-readiness and Live-service behavior.
+- [Public daily validation cadence](https://github.com/microsoft-foundry/foundry-samples/blob/main/.github/validation-pilot.README.md) — Warm-project fleet validation and reports.
 - [Pipeline README](../.azure-pipelines/README.md) — Operational details of the ADO validation pipeline.
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — Contributor guide with validation quick-reference.

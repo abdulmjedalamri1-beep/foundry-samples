@@ -4,6 +4,8 @@ This document describes the operator-run bridge from `foundry-samples-pr` (priva
 
 The public repository is the normal route for work intended for publication. The private repository is internal-first, and merging private work does not publish it. An authorized operator may dispatch this retained bridge for approved private content; the bridge always proposes that content through a normal public pull request.
 
+Repository write access or the ability to see the Actions tab does not confer operator authorization. Contributors and coding agents must not dispatch the bridge, use validation overrides, or initiate seed recovery without explicit authorization from a bridge operator for that action.
+
 This document owns the **bridge mechanics**: positive path scope, export/import, author rewriting, generated-diff guards, App-authenticated PR creation, wait-and-merge, drift verification, and the sync-time validation gate. The validation rules themselves live in [Validation Contract](validation-contract.md). The contract for pipelines that post validation statuses lives in [Validation Results Contract](validation-results-contract.md).
 
 ## Overview
@@ -236,7 +238,7 @@ Historically, the bridge copied `public-overlay/<path>` to public `<path>` after
 
 The positive scope and generated-diff guards replace those mechanisms. Public metadata is now maintained only through normal public PRs.
 
-## Public→private mirror-back
+## Public-to-private mirror-back
 
 Mirror-back is public-owned automation and is not deployed or repaired by this bridge. Its workflow, helper, and configuration under public `.github/**` must be changed through normal public PRs. The private repository is not their source of truth.
 
@@ -433,9 +435,11 @@ Each run should emit a sync-time UX summary listing:
 
 For v1, workflow logs and `$GITHUB_STEP_SUMMARY` are sufficient. Phase G owns richer reporting / dashboard work.
 
+Retain the run URL, actor, private SHA, resolved scope, generated branch, public PR, pre-sync public SHA, guard results, and any validation-override reason as the incident or change record. After inspection, delete dry-run branches manually. Normal runs delete superseded stale sync branches when they close their PRs; a failed current PR may remain for diagnosis and must be closed or superseded before cleanup is considered complete.
+
 ## Public Repo Branch Protection
 
-The public repo has a branch ruleset on `main` that requires a pull request and configured required checks. The bridge pushes only a generated branch, opens a reviewable public PR, waits for the ruleset to permit the merge, repeats the generated-diff guard against fresh public `main`, and performs the rebase merge within the same run. It has no supported direct push to public `main`.
+The public repo has an active branch ruleset on `main` that requires a pull request and the `trusted` status check. As verified on 2026-08-27, it requires zero approving reviews. The bridge pushes only a generated branch, opens a reviewable public PR, waits for the ruleset to permit the merge, repeats the generated-diff guard against fresh public `main`, and performs the rebase merge within the same run. It has no supported direct push to public `main`.
 
 `wait-and-merge.sh` deliberately does not use `gh pr merge --auto`. It polls until the PR is mergeable with no pending checks, then calls `gh pr merge --rebase` while authenticated as the App. GitHub enforces the public ruleset; the App is not a bypass actor. Marks are saved only after the pre-merge scope guard and merge succeed.
 
@@ -489,7 +493,7 @@ To verify, check:
 1. Check `wait-and-merge.sh` log output for the polling loop's exit reason.
 2. Confirm required checks on the public repo all completed green.
 3. Inspect the pre-merge generated-diff guard result.
-4. Confirm any reviews required by the current public ruleset have been submitted; the App must not bypass the ruleset.
+4. Confirm the required `trusted` check passed. The current ruleset requires no approving reviews; do not invent a review gate or bypass the ruleset.
 
 ### Author attribution is wrong
 
@@ -568,7 +572,7 @@ Entries before 2026-08-26 describe historical implementations. They are retained
 - [Validation Story — Phase B Decisions](validation-story-decisions.md) — Locked decisions that supersede earlier validation/sync-gating text.
 - [Validation Contract](validation-contract.md) — Validation behavior and gate contract.
 - [Validation Results Contract](validation-results-contract.md) — How validation pipelines post per-sample GitHub commit statuses.
-- [External Contributions](external-contributions.md) — How partner samples flow through sync.
+- [External Contributions](external-contributions.md) — Historical private partner-governance record and current public pointer.
 - [Sync Cutover Runbook](sync-cutover-runbook.md) — The one-time authorship-preserving history rewrite of public `main`.
 - [Sync Config](../.github/sync-config.json) — Bridge scope and public repo target.
 - [Sync Core Script](../.github/scripts/sync-core.sh) — The sync implementation.

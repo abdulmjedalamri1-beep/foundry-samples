@@ -2,9 +2,9 @@
 
 This document records the **one-time** authorship-preservation cutover performed on 2026-04-29 against the public `foundry-samples` repository. It is preserved as historical evidence, not as a reusable recovery template.
 
-> If you are a regular contributor and have arrived here looking for "how does sync work day to day," you want [Repo Sync Automation](repo-sync-automation.md). This document is for one-off pipeline surgery.
+> If you are a contributor, follow the public [`microsoft-foundry/foundry-samples` contribution guide](https://github.com/microsoft-foundry/foundry-samples/blob/main/CONTRIBUTING.md). If you are an authorized bridge operator, use [Repo Sync Automation](repo-sync-automation.md) and [Sync Incident Response](../.github/skills/sync-incident-response.md).
 >
-> **Historical procedure only:** the current sync workflow does not expose full-tree export, direct-public-main push, or force-push recovery. Do not use the steps below for a routine incident. Reconcile through reviewed PRs and use verified seed recovery with `dry_run=true` as documented in [Repo Sync Automation](repo-sync-automation.md).
+> **Historical procedure only:** every command below records the 2026-04-29 event and grants no current recovery authorization. The current sync workflow does not expose full-tree export, direct-public-main push, or force-push recovery. Do not use the steps below for a current incident. Reconcile through reviewed PRs and use verified seed recovery with `dry_run=true` as documented in [Repo Sync Automation](repo-sync-automation.md).
 >
 > **Current scope:** the retained bridge defaults to `infrastructure/**` and `samples/**`. An operator may add approved non-reserved paths with `additional_paths`, but `README.md`, `CONTRIBUTING.md`, `.github/**`, and `public-overlay/**` are always reserved for normal public PRs. The current bridge runs a generated-diff scope guard before push and again immediately before merge.
 
@@ -187,6 +187,7 @@ Three reasons:
 
 - [Sync Recovery Runbook (foundry-devx-eng-docs)](https://msdata.visualstudio.com/Vienna/_git/foundry-devx-eng-docs?path=/operations/sync-recovery-runbook.md) — Historical incident context; retired destructive and overlay recovery options are not current procedure.
 - [Repo Sync Automation](repo-sync-automation.md) — Current operator bridge scope, guards, failure semantics, and recovery
+- [Sync Incident Response](../.github/skills/sync-incident-response.md) — Current fail-closed operator incident playbook
 - [Validation Contract](validation-contract.md) — Validation responsibilities (no longer cross-coupled with sync)
 - [Filter stream script](../.github/scripts/filter-stream.py) — Authorship rewriting + path filtering
 - [Sync mailmap](../.github/sync-mailmap) — Internal alias → public identity mapping
