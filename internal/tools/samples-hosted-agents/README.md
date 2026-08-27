@@ -25,7 +25,11 @@ Every new sample under `samples/python/hosted-agents/` or
 4. Declare whether the sample is supported through `azd`, `vscode`, or both.
 5. Choose deterministic turns that exercise one or two defining behaviors.
 6. Assert user-visible results rather than incidental implementation details.
-7. Run both schema validation and protocol-aware planning locally.
+7. If a `console_log` assertion is necessary, target a deliberate sample-owned
+   event. Python agents must emit required runtime evidence through `logging`, not
+   an unflushed `print()`, and contracts must not depend on mutable framework or
+   dependency log wording.
+8. Run both schema validation and protocol-aware planning locally.
 
 Legacy `test-payload.txt` and generated defaults remain migration paths for existing
 samples. They are not the preferred contract for new samples.
@@ -279,6 +283,19 @@ any other universal Invocations field.
 
 JSONPath is not part of the current contract. No existing sample requires it, and
 Invocations does not guarantee structured JSON output.
+
+### `console_log`
+
+Use `console_log` only when a deliberate application log event is the clearest
+proof of the behavior. Prefer `assistant_text`, `raw`, `trace`, or `session_files`
+when those sources prove the user-visible result directly.
+
+For Python hosted agents, emit required runtime evidence with the standard
+`logging` module. A long-running process may buffer ordinary stdout indefinitely,
+so an unflushed `print()` is not reliable evidence. Assert sample-owned messages;
+do not couple contracts to framework or dependency log text that can change on a
+package update. Before adding a positive assertion, confirm the exact event appears
+in deployed console evidence for every applicable deployment mode.
 
 ## Session-file existence
 
