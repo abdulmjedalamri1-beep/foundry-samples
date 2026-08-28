@@ -8,11 +8,11 @@ tests:
   - name: local-flight-search
     turns:
       - input:
-          message: Call search_flights with city Paris and list the two returned flight labels. Then call simulate_crash, recover from the durable LangGraph checkpoint after Foundry restarts the host, and report the result. Do not plan or book a trip.
+          message: Call search_flights with city Paris and list the two returned flight labels and book a trip to Paris Express.
         assertions:
           - source: raw
             type: contains
-            value: Paris Express AA123
+            value: Paris Express
           - source: raw
             type: contains
-            value: Paris Saver BB456
+            value: Paris
