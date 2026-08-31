@@ -29,6 +29,7 @@ on:
       - ".github/scripts/cleanup-hosted-agent-ci-toolboxes.sh"
       - ".github/scripts/hosted-agent-retry.sh"
       - ".github/scripts/retry-azure-oidc-login.sh"
+      - ".github/scripts/hosted_agent_code_config.py"
       - ".github/scripts/hosted_agent_fixture.py"
       - ".github/scripts/hosted_agent_test_spec.py"
       - ".github/scripts/invoke_hosted_agent_responses.py"
@@ -50,6 +51,7 @@ on:
       - ".github/scripts/cleanup-hosted-agent-ci-toolboxes.sh"
       - ".github/scripts/hosted-agent-retry.sh"
       - ".github/scripts/retry-azure-oidc-login.sh"
+      - ".github/scripts/hosted_agent_code_config.py"
       - ".github/scripts/hosted_agent_fixture.py"
       - ".github/scripts/hosted_agent_test_spec.py"
       - ".github/scripts/invoke_hosted_agent_responses.py"
@@ -251,23 +253,28 @@ jobs:
             # `language`, `runtime`, `entry_point` are only meaningful for the
             # code arm but we emit them on every row so the matrix schema is
             # uniform (GitHub Actions matrix requires consistent keys).
-            # entry_point is the file/dll (not the full command) — azd derives
-            # the launcher from `runtime` (e.g. python_3_13 -> `python main.py`).
+            # runtime and entry_point prefer each sample's codeConfiguration.
+            # Legacy manifests without those fields use language defaults.
             #
             # Per-language classification (explicit allow-list — fails loudly
             # if a new language gets a hosted-agents/ subdir without us
             # noticing). Discovery `find` calls already only scan python and
             # csharp trees, but this guard prevents future mis-classification
             # if those paths get expanded.
-            local language runtime entry_point
+            local language runtime entry_point code_config
             local deploy_modes
             case "$sample_dir" in
               samples/python/hosted-agents/*)
                 language="python"
-                runtime="python_3_13"
-                entry_point="main.py"
-                # Python: validate both deployment surfaces (container +
-                # code). All python samples run on python_3_13.
+                code_config=$(python3 .github/scripts/hosted_agent_code_config.py \
+                  --manifest "$yaml_file" \
+                  --default-runtime "python_3_13" \
+                  --default-entry-point "main.py")
+                runtime=$(jq -r '.runtime' <<< "$code_config")
+                entry_point=$(jq -r '.entry_point' <<< "$code_config")
+                # Python: validate both deployment surfaces (container + code).
+                # Manifest-defined module/argument entry points must remain one
+                # matrix value so azd can derive the complete launch command.
                 deploy_modes='["container","code"]'
                 ;;
               samples/csharp/hosted-agents/*)
@@ -446,7 +453,7 @@ jobs:
             # changed-sample filter emitted an empty matrix, so runner changes
             # were never validated before merge.
             test_all="false"
-            if echo "$changed_files" | grep -qE '^\.github/(workflows/hosted-agents-cloud-e2e(-runner)?\.yml|scripts/((prepare|cleanup)-hosted-agent-ci-toolboxes|hosted-agent-retry|retry-azure-oidc-login)\.sh|scripts/(hosted_agent_fixture|hosted_agent_test_spec|invoke_hosted_agent_responses|collect-hosted-agent-traces)\.py|tests/(test-hosted-agent-(ci-toolboxes|session-quota)|test-retry-azure-oidc-login)\.sh|tests/test_hosted_agent_(fixture|test_spec)\.py)$'; then
+            if echo "$changed_files" | grep -qE '^\.github/(workflows/hosted-agents-cloud-e2e(-runner)?\.yml|scripts/((prepare|cleanup)-hosted-agent-ci-toolboxes|hosted-agent-retry|retry-azure-oidc-login)\.sh|scripts/(hosted_agent_code_config|hosted_agent_fixture|hosted_agent_test_spec|invoke_hosted_agent_responses|collect-hosted-agent-traces)\.py|tests/(test-hosted-agent-(ci-toolboxes|session-quota)|test-retry-azure-oidc-login)\.sh|tests/test_hosted_agent_(fixture|test_spec)\.py)$'; then
               test_all="true"
               echo "Hosted-agent E2E infrastructure changed — testing the full matrix"
             fi
