@@ -150,7 +150,7 @@ Registered tracked sets today:
 | Pipeline | Tracked-set definition | Source |
 |----------|------------------------|--------|
 | `ado-build` | Directories under `samples/` containing `sample.yaml`. The ADO pipeline enumerates these with `find samples -name "sample.yaml" -type f` during full validation. | `.azure-pipelines/validation.yml` |
-| `hosted-agents-e2e` | Directories under `samples/python/hosted-agents` and `samples/csharp/hosted-agents` containing `agent.manifest.yaml`, excluding directories that contain `.ci-skip`. | `.github/workflows/hosted-agents-cloud-e2e.yml` |
+| `hosted-agents-e2e` | Directories under `samples/python/hosted-agents` and `samples/csharp/hosted-agents` containing `azure.yaml`, excluding directories that contain `.ci-skip`. | `.azure-pipelines/hosted-agents-samples-ci.yml` |
 
 Notes:
 
@@ -165,7 +165,7 @@ This registry is informational, not an enforced allow-list in v1. It documents w
 | pipeline-id | Owning team | Trigger | Tracked-set definition | Expected creator identity | Pipeline URL/path |
 |-------------|-------------|---------|------------------------|---------------------------|-------------------|
 | `ado-build` | DevX Engineering | PR to `main`; `push: main`; schedule Mon/Wed/Fri 00:00 UTC; manual with `validateAll` | Directories containing `sample.yaml` under `samples/` | GitHub App `foundry-samples-validation-bot` installed on `microsoft-foundry/foundry-samples-pr` with `commit:statuses:write`. The App authors all `validation/ado-build/*` statuses. App credentials are stored in ADO variable group `foundry-samples-validation-bot-credentials`; the pipeline mints a short-lived installation token per run. | `.azure-pipelines/validation.yml` |
-| `hosted-agents-e2e` | Hosted Agents | PR to `main`; `push: main`; daily 09:00 UTC; manual dispatch | Directories under `samples/python/hosted-agents` and `samples/csharp/hosted-agents` containing `agent.manifest.yaml` and not containing `.ci-skip` | `github-actions[bot]` | `.github/workflows/hosted-agents-cloud-e2e.yml` |
+| `hosted-agents-e2e` | Hosted Agents | PR to `main`; `push: main`; daily 09:00 UTC; manual run | Directories under `samples/python/hosted-agents` and `samples/csharp/hosted-agents` containing `azure.yaml` and not containing `.ci-skip` | GitHub App `foundry-samples-validation-bot` (same App as `ado-build`; credentials in ADO variable group `foundry-samples-validation-bot-credentials`, short-lived installation token minted per run) | `.azure-pipelines/hosted-agents-samples-ci.yml` |
 
 Do not reuse another team's `pipeline-id`. The `pipeline-id` is the namespace that prevents one reporter from overwriting another reporter's status.
 
@@ -316,7 +316,7 @@ These snippets are intentionally minimal. Production pipelines should add retrie
 
 ### GitHub Actions: `actions/github-script`
 
-Use this pattern for GitHub Actions workflows such as `hosted-agents-e2e`.
+Use this pattern for pipelines that run as GitHub Actions workflows.
 
 Required workflow permission:
 
@@ -429,3 +429,4 @@ If a language job can fail before writing a failed sample list, add a recovery s
 | 2026-04-30 | D3 reader implemented in PR #214: `.github/scripts/parse-validation-statuses.sh` now consumes statuses-list payloads and emits SYNC_BLOCKED_PATHS-compatible output. |
 | 2026-04-30 | Added App operations notes for `foundry-samples-validation-bot`; retired the standalone registration runbook in favor of durable ops guidance here. |
 | 2026-05-05 | D5 canary: `hosted-agents-cloud-e2e.yml` begins posting `validation/hosted-agents-e2e/<sample-path>` for `samples/python/hosted-agents/agent-framework/responses/01-basic`. First externally-owned reporter on the contract; widen pending the gate dry-run criteria in `docs/validation-story-decisions.md` §9. |
+| 2026-08-25 | `hosted-agents-e2e` migrated from GitHub Actions to Azure DevOps (`.azure-pipelines/hosted-agents-samples-ci.yml`); the GitHub workflows were deleted. Context namespace, canary scope and SHA targeting are unchanged. Creator identity moves from `github-actions[bot]` to the `foundry-samples-validation-bot` App, and statuses are now posted once per sample from the Summary stage (a sample passes only if every one of its combos passed) instead of once per matrix job. |

@@ -18,54 +18,13 @@
 name: Hosted Agents Cloud E2E
 
 on:
-  pull_request:
-    branches: [ main ]
-    paths:
-      - "samples/python/hosted-agents/**"
-      - "samples/csharp/hosted-agents/**"
-      - ".github/workflows/hosted-agents-cloud-e2e.yml"
-      - ".github/workflows/hosted-agents-cloud-e2e-runner.yml"
-      - ".github/scripts/prepare-hosted-agent-ci-toolboxes.sh"
-      - ".github/scripts/cleanup-hosted-agent-ci-toolboxes.sh"
-      - ".github/scripts/hosted-agent-retry.sh"
-      - ".github/scripts/retry-azure-oidc-login.sh"
-      - ".github/scripts/hosted_agent_code_config.py"
-      - ".github/scripts/hosted_agent_fixture.py"
-      - ".github/scripts/hosted_agent_test_spec.py"
-      - ".github/scripts/invoke_hosted_agent_responses.py"
-      - ".github/scripts/collect-hosted-agent-traces.py"
-      - ".github/tests/test-hosted-agent-ci-toolboxes.sh"
-      - ".github/tests/test-hosted-agent-session-quota.sh"
-      - ".github/tests/test-retry-azure-oidc-login.sh"
-      - ".github/tests/test_hosted_agent_fixture.py"
-      - ".github/tests/test_hosted_agent_test_spec.py"
-      - "internal/tools/samples-hosted-agents/**"
-  push:
-    branches: [ main ]
-    paths:
-      - "samples/python/hosted-agents/**"
-      - "samples/csharp/hosted-agents/**"
-      - ".github/workflows/hosted-agents-cloud-e2e.yml"
-      - ".github/workflows/hosted-agents-cloud-e2e-runner.yml"
-      - ".github/scripts/prepare-hosted-agent-ci-toolboxes.sh"
-      - ".github/scripts/cleanup-hosted-agent-ci-toolboxes.sh"
-      - ".github/scripts/hosted-agent-retry.sh"
-      - ".github/scripts/retry-azure-oidc-login.sh"
-      - ".github/scripts/hosted_agent_code_config.py"
-      - ".github/scripts/hosted_agent_fixture.py"
-      - ".github/scripts/hosted_agent_test_spec.py"
-      - ".github/scripts/invoke_hosted_agent_responses.py"
-      - ".github/scripts/collect-hosted-agent-traces.py"
-      - ".github/tests/test-hosted-agent-ci-toolboxes.sh"
-      - ".github/tests/test-hosted-agent-session-quota.sh"
-      - ".github/tests/test-retry-azure-oidc-login.sh"
-      - ".github/tests/test_hosted_agent_fixture.py"
-      - ".github/tests/test_hosted_agent_test_spec.py"
-      - "internal/tools/samples-hosted-agents/**"
-  schedule:
-    # Daily regression run at 08:00 UTC against main.
-    # Catches platform-side regressions even when no code changes are made.
-    - cron: "0 9 * * *"
+  # Automatic triggers intentionally removed. Azure DevOps owns scheduled and
+  # per-change runs of this suite (.azure-pipelines/hosted-agents-samples-ci.yml).
+  # Both pipelines publish the SAME per-sample status context
+  # (validation/hosted-agents-e2e/<sample-path>), so if both ran automatically
+  # they would race and the sync gate could consume whichever finished last.
+  # This workflow is retained for manual use; re-add pull_request/push/schedule
+  # here to restore automatic runs.
   workflow_dispatch:
     inputs:
       sample_filter:

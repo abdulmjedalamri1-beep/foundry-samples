@@ -134,6 +134,48 @@ The check is implemented by `.azure-pipelines/scripts/check-hosted-agent-python-
 
 ---
 
+## Hosted Agents Cloud E2E (`hosted-agents-samples-ci.yml`)
+
+`hosted-agents-samples-ci.yml` is a separate, Level 4 (Run) pipeline registered as `hosted-agents-e2e` in [`docs/validation-results-contract.md`](../docs/validation-results-contract.md). It deploys every hosted-agent sample to a real Foundry project with `azd`, invokes it, and asserts against the sample's `test-spec.yml`.
+
+It was migrated from the GitHub Actions workflows `.github/workflows/hosted-agents-cloud-e2e.yml` + `hosted-agents-cloud-e2e-runner.yml`, which have been deleted; this pipeline is now the only hosted-agent E2E runner. The helper scripts it calls still live under `.github/scripts/` (both that directory and `.azure-pipelines/` are excluded from public sync, so the location is cosmetic).
+
+| Stage | What it does |
+|-------|--------------|
+| `Discover` | Runs the hosted-agent test-spec/toolbox/session-quota unit tests, then builds the combo matrix via [`internal/tools/samples-hosted-agents-ci/discover-samples.sh`](../internal/tools/samples-hosted-agents-ci/discover-samples.sh) and publishes it as the `HostedAgentSamplesMatrix` artifact |
+| `CleanupOrphanedToolboxes` | Reclaims CI toolboxes older than 24h leaked by cancelled runs |
+| `CloudE2E_python` / `CloudE2E_csharp` | One matrix job per combo. The job body is written once and expanded per shard by a compile-time `${{ each shard in parameters.shards }}` loop, so each language gets its own matrix and stays under the Azure Pipelines 256-job cap |
+| `Summary` | Aggregates `result.txt` from every combo, publishes the build summary + `sample-status` artifact, and (on unfiltered `main` runs with `publishValidationStatuses` enabled) posts the `validation/hosted-agents-e2e/<sample-path>` commit statuses the sync gate consumes |
+
+Notes:
+
+- **Combos.** Each sample is expanded across deploy modes (`container`, `code`) and, for toolbox samples, across every endpoint in `TOOLBOX_ENDPOINT_NCUS`. Drop a `.ci-skip` file in a sample directory to exclude it entirely, or `.code-ci-skip` to keep only the container arm.
+- **Matrix payload.** Only `comboId` travels through the ADO matrix; each job hydrates the rest of its record from the `HostedAgentSamplesMatrix` artifact, because a full matrix would exceed what a single ADO variable can carry.
+- **Auth.** Every `azd`/`az` step runs inside `AzureCLI@2` against `$(AZURE_SERVICE_CONNECTION)`, which replaces the OIDC login and retry logic the GitHub workflow needed.
+- **Configuration.** Variable group `samples-hosted-agents-ci` plus `foundry-samples-validation-bot-credentials` for status posting. Most of these previously lived as **GitHub repo variables** (`vars.*`) and were copied into the group verbatim — the pipeline reads them directly as macros:
+
+  | Variable | Purpose |
+  |---|---|
+  | `CLOUD_E2E_ENABLED` | Optional kill-switch. Set to `false` to skip the pipeline; unset or any other value runs it. Azure Pipelines can also disable the pipeline from its settings. |
+  | `AZURE_SERVICE_CONNECTION` | Service connection every `azd`/`az` step authenticates through. ADO-only — there is no GitHub equivalent, so it must be maintained by hand. It has to be scoped to the same subscription as `AZURE_SUBSCRIPTION_ID`. |
+  | `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP` | Target subscription / resource group. |
+  | `AZURE_AI_PROJECT_ID`, `AZURE_AI_PROJECT_ENDPOINT`, `AZURE_AI_PROJECT_NAME` | Default Foundry project. |
+  | `TOOLBOX_ENDPOINT_NCUS` | Toolbox fan-out list, one `label=url\|query` per line. Empty means toolbox samples are skipped. |
+  | `TOOLBOX_PROJECT_ID`, `TOOLBOX_PROJECT_ENDPOINT` (+ `_WESTUS2`) | Dedicated toolbox project. |
+  | `CLOUD_E2E_CODE_DEPLOY_ENABLED` | Set `false` to drop the code-deploy arm globally. |
+  | `GH_PAT` | Templated into toolbox connection credentials and the Copilot SDK sample. |
+  | `PLAYWRIGHT_SERVICE_ACCESS_TOKEN` | Browser Automation samples. |
+  | `AZURE_AI_RAI_POLICY_ID` | Real RAI policy ARM ID for the content-safety sample. |
+  | `CONTENT_SAFETY_TEST_PROMPT` | Policy-violating prompt for the guardrail block test. Unset = that test no-ops. |
+
+  Everything else the samples need (`SKIP_PROVISION`, `AZURE_AI_ACCOUNT_NAME`, `AZURE_CONTAINER_REGISTRY_ENDPOINT`, `AZURE_OPENAI_*`, `TOOLBOX_MODEL_DEPLOYMENT_NAME`, …) is forwarded to `azd env set` by prefix, so adding it to the variable group is enough.
+
+  If the required variables are missing the `Discover` stage **fails** rather than skipping. An earlier `eq(CLOUD_E2E_ENABLED, 'true')` stage gate meant an unset variable skipped every stage and reported the build green — a false pass on a pipeline the sync gate reads.
+- **azd env passthrough.** GitHub Actions could dump every repo variable with `toJson(vars)`; Azure Pipelines has no equivalent, so the runner forwards pipeline variables to `azd env set` using a prefix allow-list (`AZURE_`, `FOUNDRY_`, `TOOLBOX_`, `MODEL_`, `OPENAI_`, …). Add a prefix in the runner template if a new variable falls outside it.
+- **Status page.** The GitHub workflow also published an HTML status page to `gh-pages`; that step was not migrated. The same data is available from the `sample-status` artifact and the build summary.
+
+---
+
 ## See also
 
 - [`docs/validation-contract.md`](../docs/validation-contract.md) — Transitional private ADO levels, the `sample.yaml` contract, and bridge-time status filtering.
