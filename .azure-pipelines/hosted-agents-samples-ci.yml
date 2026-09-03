@@ -93,13 +93,6 @@ parameters:
       Comma-separated = OR (match any). Empty = full matrix.
     type: string
     default: ''
-  - name: publishValidationStatuses
-    displayName: >-
-      Post validation/hosted-agents-e2e commit statuses that the sync gate
-      consumes. Turn off only to run this pipeline without touching the gate;
-      leaving it off means the tracked samples report nothing and sync ungated.
-    type: boolean
-    default: true
   - name: shards
     displayName: >-
       Language shards to expand the E2E stage into. One stage and one matrix per
@@ -2445,7 +2438,7 @@ stages:
                     echo "##vso[task.logissue type=warning]Environment: $AZD_ENV_NAME"
                   fi
 
-  # ── Summary + validation statuses ───────────────────────────────────
+  # ── Summary ─────────────────────────────────────────────────────────
   - stage: Summary
     displayName: E2E Summary
     dependsOn:
@@ -2455,30 +2448,7 @@ stages:
     condition: and(succeeded('Discover'), ne(dependencies.Discover.outputs['DiscoverSamples.discover.count'], '0'))
     jobs:
       - job: PublishSummary
-        displayName: Publish sample status
-        variables:
-          # GH_APP_ID / GH_APP_INSTALLATION_ID / GH_APP_PRIVATE_KEY for the
-          # per-sample validation commit statuses the sync gate consumes.
-          #
-          # Scoped as narrowly as possible for three reasons:
-          #   - Azure Pipelines requires each pipeline to be authorized against a
-          #     variable group. Declaring it pipeline-wide made the *Discover*
-          #     stage wait on a permission prompt for credentials it never uses.
-          #   - It keeps the GitHub App credentials out of the ~174 sample jobs,
-          #     which run sample code and call third-party toolbox endpoints.
-          #   - Only unfiltered `main` runs reference the group, so PR runs and
-          #     manual branch runs neither need the authorization nor expose the
-          #     credentials.
-          #
-          # The `main` check also subsumes a PR check: a PR build's SourceBranch
-          # is refs/pull/<n>/merge, never refs/heads/main.
-          - ${{ if and(parameters.publishValidationStatuses, eq(parameters.sampleFilter, ''), eq(variables['Build.SourceBranch'], 'refs/heads/main')) }}:
-            - group: foundry-samples-validation-bot-credentials
-          # The sync gate reads statuses on the `main` commit it is about to
-          # sync, which is exactly Build.SourceVersion for the CI/schedule runs
-          # on main that post. PR and branch runs do not post (see above).
-          - name: TARGET_SHA
-            value: $(Build.SourceVersion)
+        displayName: Publish E2E summary
         steps:
           - checkout: self
             fetchDepth: 1
@@ -2556,90 +2526,6 @@ stages:
             artifact: sample-status
             displayName: Upload status artifact
             condition: always()
-
-          # ── Publish validation commit statuses (D5 canary) ──────────
-          # Posts GitHub commit statuses under the External Validation Contract
-          # (docs/validation-results-contract.md) with the pipeline id
-          # `hosted-agents-e2e`. The sync gate reads these on the `main` commit
-          # it is about to sync.
-          #
-          # Compiled out on PR runs. The gate only ever evaluates `main` commits,
-          # so PR statuses were advisory decoration; skipping them means PR runs
-          # need no GitHub App credentials and no variable-group authorization.
-          # Per-sample PR results are still visible in the build summary and the
-          # sample-status artifact.
-          #
-          # Also compiled out on filtered manual runs (sampleFilter set): those
-          # evaluate only a subset of a sample's combos and must not overwrite a
-          # prior full-run sample-level failure that the sync gate relies on.
-          - ${{ if and(parameters.publishValidationStatuses, eq(parameters.sampleFilter, ''), eq(variables['Build.SourceBranch'], 'refs/heads/main')) }}:
-            - bash: |
-                set -euo pipefail
-                is_missing() { [[ -z "${1:-}" || "$1" == \$\(*\) ]]; }
-                if is_missing "$GH_APP_ID" || is_missing "$GH_APP_INSTALLATION_ID" || is_missing "$GH_APP_PRIVATE_KEY"; then
-                  echo "##vso[task.logissue type=error]GitHub App credentials are not available; cannot post validation statuses. Verify the foundry-samples-validation-bot-credentials variable group is linked."
-                  exit 1
-                fi
-                if token="$(.azure-pipelines/scripts/mint-installation-token.sh)"; then
-                  echo "##vso[task.setvariable variable=GitHubAppToken;issecret=true]$token"
-                  echo "Minted GitHub App installation token for validation status posting."
-                else
-                  echo "##vso[task.logissue type=error]Failed to mint GitHub App installation token; cannot post validation statuses."
-                  exit 1
-                fi
-              displayName: Mint GitHub App installation token
-              condition: always()
-              env:
-                GH_APP_ID: $(GH_APP_ID)
-                GH_APP_INSTALLATION_ID: $(GH_APP_INSTALLATION_ID)
-                GH_APP_PRIVATE_KEY: $(GH_APP_PRIVATE_KEY)
-
-            - bash: |
-                set -euo pipefail
-                if [[ -z "${GITHUB_TOKEN:-}" || "$GITHUB_TOKEN" == \$\(*\) ]]; then
-                  echo "##vso[task.logissue type=error]No GitHub App token available; cannot post validation statuses."
-                  exit 1
-                fi
-
-                # Canary scope: only the sample below until one clean daily run
-                # on `main` posts `success`. Widen by clearing CANARY_SAMPLE_PATH.
-                CANARY_SAMPLE_PATH="samples/python/hosted-agents/agent-framework/responses/01-basic"
-
-                # A sample passes only if every one of its combos passed.
-                jq -r '
-                  .samples
-                  | group_by(.path)[]
-                  | [ (.[0].path), (if any(.[]; .status != "success") then "failure" else "success" end) ]
-                  | @tsv
-                ' /tmp/status/sample-status.json > /tmp/status/per-sample.tsv
-
-                posted=0
-                while IFS=$'\t' read -r sample_path state; do
-                  if [ -n "$CANARY_SAMPLE_PATH" ] && [ "$sample_path" != "$CANARY_SAMPLE_PATH" ]; then
-                    continue
-                  fi
-                  context="validation/hosted-agents-e2e/${sample_path}"
-                  if [ "$state" = "success" ]; then description="Cloud E2E passed"; else description="Cloud E2E failed"; fi
-                  echo "Posting $state to $context on $GITHUB_SHA"
-                  payload="$(jq -nc --arg state "$state" --arg context "$context" \
-                    --arg target_url "$BUILD_URL" --arg description "$description" \
-                    '{state:$state,context:$context,target_url:$target_url,description:$description}')"
-                  curl --fail-with-body -sS \
-                    -X POST \
-                    -H "Authorization: Bearer $GITHUB_TOKEN" \
-                    -H "Accept: application/vnd.github+json" \
-                    -H "X-GitHub-Api-Version: 2022-11-28" \
-                    "https://api.github.com/repos/microsoft-foundry/foundry-samples-pr/statuses/${GITHUB_SHA}" \
-                    -d "$payload" > /dev/null
-                  posted=$((posted + 1))
-                done < /tmp/status/per-sample.tsv
-                echo "Successfully posted $posted validation status(es)."
-              displayName: Publish GitHub validation statuses
-              condition: always()
-              env:
-                GITHUB_TOKEN: $(GitHubAppToken)
-                GITHUB_SHA: $(TARGET_SHA)
-                BUILD_URL: $(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)
 
   # ── No-op signal ────────────────────────────────────────────────────
   - stage: NoSamples

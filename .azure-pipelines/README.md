@@ -145,14 +145,14 @@ It was migrated from the GitHub Actions workflows `.github/workflows/hosted-agen
 | `Discover` | Runs the hosted-agent test-spec/toolbox/session-quota unit tests, then builds the combo matrix via [`internal/tools/samples-hosted-agents-ci/discover-samples.sh`](../internal/tools/samples-hosted-agents-ci/discover-samples.sh) and publishes it as the `HostedAgentSamplesMatrix` artifact |
 | `CleanupOrphanedToolboxes` | Reclaims CI toolboxes older than 24h leaked by cancelled runs |
 | `CloudE2E_python` / `CloudE2E_csharp` | One matrix job per combo. The job body is written once and expanded per shard by a compile-time `${{ each shard in parameters.shards }}` loop, so each language gets its own matrix and stays under the Azure Pipelines 256-job cap |
-| `Summary` | Aggregates `result.txt` from every combo, publishes the build summary + `sample-status` artifact, and (on unfiltered `main` runs with `publishValidationStatuses` enabled) posts the `validation/hosted-agents-e2e/<sample-path>` commit statuses the sync gate consumes |
+| `Summary` | Aggregates `result.txt` from every combo and publishes the build summary plus the `sample-status` artifact |
 
 Notes:
 
 - **Combos.** Each sample is expanded across deploy modes (`container`, `code`) and, for toolbox samples, across every endpoint in `TOOLBOX_ENDPOINT_NCUS`. Drop a `.ci-skip` file in a sample directory to exclude it entirely, or `.code-ci-skip` to keep only the container arm.
 - **Matrix payload.** Only `comboId` travels through the ADO matrix; each job hydrates the rest of its record from the `HostedAgentSamplesMatrix` artifact, because a full matrix would exceed what a single ADO variable can carry.
 - **Auth.** Every `azd`/`az` step runs inside `AzureCLI@2` against `$(AZURE_SERVICE_CONNECTION)`, which replaces the OIDC login and retry logic the GitHub workflow needed.
-- **Configuration.** Variable group `samples-hosted-agents-ci` plus `foundry-samples-validation-bot-credentials` for status posting. Most of these previously lived as **GitHub repo variables** (`vars.*`) and were copied into the group verbatim — the pipeline reads them directly as macros:
+- **Configuration.** Variable group `samples-hosted-agents-ci`. Most of these previously lived as **GitHub repo variables** (`vars.*`) and were copied into the group verbatim — the pipeline reads them directly as macros:
 
   | Variable | Purpose |
   |---|---|
