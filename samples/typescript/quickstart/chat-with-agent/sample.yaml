@@ -1,5 +1,5 @@
 name: Quickstart Chat with Agent
 description: Basic quickstart sample demonstrating Microsoft Foundry chat with Agent.
 
-build: "npm install"
+build: "npm install --registry=https://registry.npmjs.org/"
 validate: "npx tsc --noEmit"
