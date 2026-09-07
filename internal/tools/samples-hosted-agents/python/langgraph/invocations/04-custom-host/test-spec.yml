@@ -7,7 +7,8 @@ sample:
 tests:
   - name: custom-host-smoke
     turns:
-      - input: Reply with exactly LOCATION-AWARE-READY.
+      - input:
+          message: Reply with exactly LOCATION-AWARE-READY.
         assertions:
           - source: raw
             type: contains
