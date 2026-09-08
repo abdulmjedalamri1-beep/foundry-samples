@@ -73,10 +73,11 @@ HOSTED_AGENT_QUOTA_RETRY_DELAY_SECONDS=0
 [ "$(hosted_agent_quota_retry_delay)" = "0" ] || fail "delay override was not honored"
 
 responses_helper="$repo_root/internal/tools/samples-hosted-agents-ci/scripts/invoke_hosted_agent_responses.py"
-runner="$repo_root/.azure-pipelines/hosted-agents-samples-ci.yml"
+pipeline="$repo_root/.azure-pipelines/hosted-agents-samples-ci.yml"
+runner="$repo_root/internal/tools/samples-hosted-agents-ci/run-hosted-agent.sh"
 
 [ -f "$runner" ] || fail "hosted-agent E2E pipeline is missing: $runner"
-grep -Fq 'CI_AGENT_SESSION_ID: ado-ci-$(Build.BuildId)-$(System.JobAttempt)-${{ shard }}-$(System.JobPositionInPhase)' "$runner" \
+grep -Fq 'CI_AGENT_SESSION_ID: ado-ci-$(Build.BuildId)-$(System.JobAttempt)-${{ shard }}-$(System.JobPositionInPhase)' "$pipeline" \
   || fail "pipeline does not define one run-specific session per cell"
 response_session_uses=$((
   $(grep -Fc 'agent_session_id:$session_id' "$runner") +

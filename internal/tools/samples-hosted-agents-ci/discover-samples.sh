@@ -289,7 +289,7 @@ if [ "$DISCOVERY_MODE" = "changed" ]; then
   # Without this, a runner change triggers the pipeline but the changed-sample
   # filter emits an empty matrix, so the change is never validated before merge.
   test_all="false"
-  if echo "$changed_files" | grep -qE '^(\.azure-pipelines/hosted-agents-samples-ci\.yml|internal/tools/samples-hosted-agents-ci/(discover-samples\.sh|scripts/((prepare|cleanup)-hosted-agent-ci-toolboxes|hosted-agent-retry)\.sh|scripts/(hosted_agent_fixture|hosted_agent_test_spec|invoke_hosted_agent_responses|collect-hosted-agent-traces)\.py|tests/test-hosted-agent-(ci-toolboxes|session-quota)\.sh|tests/test_hosted_agent_(fixture|test_spec)\.py))$'; then
+  if echo "$changed_files" | grep -qE '^(\.azure-pipelines/hosted-agents-samples-ci\.yml$|internal/tools/samples-hosted-agents-ci/)'; then
     test_all="true"
     echo "Hosted-agent E2E infrastructure changed — testing the full matrix" >&2
   fi
