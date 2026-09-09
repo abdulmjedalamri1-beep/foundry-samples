@@ -21,6 +21,7 @@ Use the configuration-driven `langchain_azure_ai.agents.hosting.run` entrypoint 
 | 10  | [Run](responses/10-run/)                                              | A minimal configuration-driven LangGraph agent hosted over the Responses protocol with the `langchain_azure_ai.agents.hosting.run` entrypoint.                                         |
 | 11  | [Deep Agents](responses/11-deep-agents/)                              | A deep research agent with Toolbox tools and a Foundry-backed checkpointer. Uses the host class for async resource lifecycle management.                                               |
 | 12  | [Custom Host](responses/12-custom-host/)                              | Extends a multi-turn chat agent with a locale header and custom location messages using `ResponsesHostServer`.                                                                         |
+| 13  | [Custom Conversation Chain Store](responses/13-custom-conversation-chain-store/) | Uses `ConversationChainStoreProtocol` to persist conversation checkpoint references in a SQLite file.                                                                         |
 
 ### Invocations API
 
