@@ -298,6 +298,10 @@ print_value(resolve(query))
             "FOUNDRY_MODEL_DEPLOYMENT: ${{ vars.MODEL_DEPLOYMENT }}",
             workflow,
         )
+        self.assertIn(
+            "LIVE_VALIDATION_AGENT_NAME: validation-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.id }}",
+            workflow,
+        )
         self.assertIn('SKIP_PROVISION: "true"', workflow)
         self.assertIn('python -m pip install -r "${{ matrix.path }}/requirements.txt"', workflow)
 

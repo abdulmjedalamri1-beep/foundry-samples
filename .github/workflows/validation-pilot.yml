@@ -125,6 +125,7 @@ jobs:
       FOUNDRY_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
       MODEL_DEPLOYMENT: ${{ vars.MODEL_DEPLOYMENT }}
       FOUNDRY_MODEL_DEPLOYMENT: ${{ vars.MODEL_DEPLOYMENT }}
+      LIVE_VALIDATION_AGENT_NAME: validation-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.id }}
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -136,7 +137,6 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - uses: actions/setup-python@v5
-        if: matrix.validator_language == 'python'
         with:
           python-version: '3.12'
       - name: Install yq

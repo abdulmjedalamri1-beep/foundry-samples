@@ -57,6 +57,7 @@ MODE="build-readiness"
 LIVE_SERVICE_VALIDATION_DECLARED=""
 SAMPLE_YAML_FAIL_STEP=""
 PYTHON_VENV_DIR=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 usage() {
     cat <<'EOF'
@@ -613,6 +614,61 @@ run_live_service_validation() {
 
     apply_live_service_substitutions
 
+    local cleanup_snapshot=""
+    if [ "$(yq eval '.live_service_validation | has("cleanup_resources")' "$yaml" 2>/dev/null)" = "true" ]; then
+        local cleanup_kind cleanup_count cleanup_index resource_kind resource_type_tag resource_type
+        local name_env_tag name_env name_value
+        local -a cleanup_args=()
+        cleanup_kind="$(yq eval '.live_service_validation.cleanup_resources | kind' "$yaml" 2>/dev/null)" ||
+            error "failed to read sample.yaml live_service_validation.cleanup_resources: $yaml"
+        [ "$cleanup_kind" = "seq" ] ||
+            error "sample.yaml live_service_validation.cleanup_resources must be a list"
+        cleanup_count="$(yq eval '.live_service_validation.cleanup_resources | length' "$yaml" 2>/dev/null)" ||
+            error "failed to read sample.yaml live_service_validation.cleanup_resources: $yaml"
+        [ "$cleanup_count" -gt 0 ] ||
+            error "sample.yaml live_service_validation.cleanup_resources must not be empty"
+
+        cleanup_index=0
+        while [ "$cleanup_index" -lt "$cleanup_count" ]; do
+            resource_kind="$(yq eval ".live_service_validation.cleanup_resources[$cleanup_index] | kind" "$yaml" 2>/dev/null)" ||
+                error "failed to read sample.yaml live_service_validation.cleanup_resources[$cleanup_index]: $yaml"
+            [ "$resource_kind" = "map" ] ||
+                error "sample.yaml live_service_validation.cleanup_resources[$cleanup_index] must be a mapping"
+            resource_type_tag="$(yq eval ".live_service_validation.cleanup_resources[$cleanup_index].type | tag" "$yaml" 2>/dev/null)" ||
+                error "failed to read sample.yaml live_service_validation.cleanup_resources[$cleanup_index].type: $yaml"
+            [ "$resource_type_tag" = "!!str" ] ||
+                error "sample.yaml live_service_validation.cleanup_resources[$cleanup_index].type must be a string"
+            resource_type="$(yq eval ".live_service_validation.cleanup_resources[$cleanup_index].type" "$yaml" 2>/dev/null)" ||
+                error "failed to read sample.yaml live_service_validation.cleanup_resources[$cleanup_index].type: $yaml"
+            [ "$resource_type" = "foundry_agent_versions" ] ||
+                error "unsupported live-service cleanup resource type: $resource_type"
+
+            name_env_tag="$(yq eval ".live_service_validation.cleanup_resources[$cleanup_index].name_env | tag" "$yaml" 2>/dev/null)" ||
+                error "failed to read sample.yaml live_service_validation.cleanup_resources[$cleanup_index].name_env: $yaml"
+            [ "$name_env_tag" = "!!str" ] ||
+                error "sample.yaml live_service_validation.cleanup_resources[$cleanup_index].name_env must be a string"
+            name_env="$(yq eval ".live_service_validation.cleanup_resources[$cleanup_index].name_env" "$yaml" 2>/dev/null)" ||
+                error "failed to read sample.yaml live_service_validation.cleanup_resources[$cleanup_index].name_env: $yaml"
+            [[ "$name_env" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] ||
+                error "sample.yaml live_service_validation.cleanup_resources[$cleanup_index].name_env is not a valid environment-variable name: $name_env"
+            [ -n "${!name_env:-}" ] ||
+                error "required live-service cleanup environment variable is missing or empty: $name_env"
+            name_value="${!name_env}"
+            cleanup_args+=(--foundry-agent "$name_value")
+            cleanup_index=$((cleanup_index + 1))
+        done
+
+        require_tool python3
+        require_tool az
+        cleanup_snapshot="$(mktemp)" || error "failed to create temporary live-resource snapshot"
+        echo "Capturing live-resource snapshot before sample command"
+        if ! python3 "$SCRIPT_DIR/live-resource-cleanup.py" snapshot \
+            --output "$cleanup_snapshot" "${cleanup_args[@]}"; then
+            rm -f "$cleanup_snapshot"
+            error "failed to capture live-resource cleanup snapshot"
+        fi
+    fi
+
     echo "Running live-service command (SKIP_PROVISION=$SKIP_PROVISION): $cmd"
     local live_service_log
     live_service_log="$(mktemp)" || error "failed to create temporary live-service command log"
@@ -622,21 +678,14 @@ run_live_service_validation() {
     cat "$live_service_log"
     rm -f "$live_service_log"
 
-    # Best-effort, convention-based per-sample cleanup: if the sample directory ships
-    # a live-cleanup.sh, run it automatically here — no sample.yaml declaration needed.
-    # This only ever deletes what that sample's own live_service_validation.command
-    # created (e.g. a named agent); it never touches shared/pre-existing project
-    # resources such as the model deployment. Its own exit status is logged but never
-    # changes the pass/fail verdict below, which is always driven by $live_service_rc.
-    if [ -f "$SAMPLE_DIR/live-cleanup.sh" ]; then
-        echo "Running live-cleanup.sh (best-effort; does not affect pass/fail)"
-        local cleanup_log cleanup_rc
-        cleanup_log="$(mktemp)" || error "failed to create temporary live-cleanup log"
-        ( cd "$SAMPLE_DIR" && bash live-cleanup.sh ) >"$cleanup_log" 2>&1
-        cleanup_rc=$?
-        cat "$cleanup_log"
-        rm -f "$cleanup_log"
-        [ "$cleanup_rc" -eq 0 ] || echo "WARNING: live-cleanup.sh exited $cleanup_rc (ignored)"
+    if [ -n "$cleanup_snapshot" ]; then
+        echo "Removing resources created by the live-service command"
+        if ! python3 "$SCRIPT_DIR/live-resource-cleanup.py" cleanup \
+            --snapshot "$cleanup_snapshot"; then
+            rm -f "$cleanup_snapshot"
+            error "live-resource cleanup failed"
+        fi
+        rm -f "$cleanup_snapshot"
     fi
 
     case "$live_service_rc" in

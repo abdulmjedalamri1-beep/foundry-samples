@@ -67,11 +67,17 @@ live_service_validation:
   required_env:
     - AZURE_OPENAI_ENDPOINT
     - MODEL_DEPLOYMENT
+    - LIVE_VALIDATION_AGENT_NAME
+  cleanup_resources:
+    - type: foundry_agent_versions
+      name_env: LIVE_VALIDATION_AGENT_NAME
   substitutions:
     - file: run_sample.py
       replacements:
         - placeholder: "your_project_endpoint"
           env: AZURE_AI_PROJECT_ENDPOINT
+        - placeholder: "your-agent-name"
+          env: LIVE_VALIDATION_AGENT_NAME
 ```
 
 The contract is:
@@ -109,13 +115,26 @@ The contract is:
   rewritten checkout. Target files must be regular, non-symlinked text files
   without NUL bytes. Rewriting uses Bash only, so a substitution never adds a
   toolchain requirement beyond the sample's own language.
+- `live_service_validation.cleanup_resources` is optional. It declares resource
+  scopes that the shared cleanup utility snapshots immediately before the live
+  command and compares immediately afterward. The currently supported type is
+  `foundry_agent_versions`; its `name_env` must identify a non-empty environment
+  variable containing the agent name. Cleanup deletes the whole agent when it
+  did not exist before the command; for a pre-existing agent, it deletes only
+  versions absent from the pre-command snapshot. Agents and versions that
+  existed before the run are preserved. Cleanup failure is an infrastructure
+  error rather than a successful validation with leaked resources.
+- Live-validation callers should substitute a unique per-run agent name into
+  samples that declare `foundry_agent_versions`. This isolates parallel jobs and
+  prevents one run from claiming another run's newly created version.
 - `SKIP_PROVISION` is a reserved caller input and must be set to exactly `true`
   or `false` whenever live-service validation is declared. The validator
   passes it through but never provisions resources itself. Current repository
   workflows use the warm project with `true`; cold provisioning and a caller
   policy for `false` are not yet delivered.
 - Authentication and cloud configuration are caller-owned. The command inherits
-  the caller's environment and existing CLI/OIDC login. Do not put credentials,
+  the caller's environment and existing CLI/OIDC login. Cleanup declarations
+  additionally require Python 3 and Azure CLI on `PATH`. Do not put credentials,
   secrets, resource provisioning, or production mutations in `sample.yaml`.
 - If `live_service_validation` is omitted (or `sample.yaml` itself is absent),
   `--mode live-service` exits `0`
