@@ -7,14 +7,12 @@ live_service_validation:
   command: "mvn compile exec:java -Dexec.mainClass=com.azure.ai.agents.ChatWithAgent"
   required_env:
     - FOUNDRY_PROJECT_ENDPOINT
-    - LIVE_VALIDATION_AGENT_NAME
   cleanup_resources:
     - type: foundry_agent_versions
-      name_env: LIVE_VALIDATION_AGENT_NAME
   substitutions:
     - file: src/main/java/com/azure/ai/agents/ChatWithAgent.java
       replacements:
         - placeholder: "your_project_endpoint"
           env: FOUNDRY_PROJECT_ENDPOINT
         - placeholder: "your-agent-name"
-          env: LIVE_VALIDATION_AGENT_NAME
+          generate: unique_name

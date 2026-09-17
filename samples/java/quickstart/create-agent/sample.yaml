@@ -8,10 +8,8 @@ live_service_validation:
   required_env:
     - FOUNDRY_PROJECT_ENDPOINT
     - MODEL_DEPLOYMENT
-    - LIVE_VALIDATION_AGENT_NAME
   cleanup_resources:
     - type: foundry_agent_versions
-      name_env: LIVE_VALIDATION_AGENT_NAME
   substitutions:
     - file: src/main/java/com/azure/ai/agents/CreateAgent.java
       replacements:
@@ -20,4 +18,4 @@ live_service_validation:
         - placeholder: "gpt-5-mini"
           env: MODEL_DEPLOYMENT
         - placeholder: "your-agent-name"
-          env: LIVE_VALIDATION_AGENT_NAME
+          generate: unique_name

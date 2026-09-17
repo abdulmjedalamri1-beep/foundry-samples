@@ -125,7 +125,6 @@ jobs:
       FOUNDRY_PROJECT_ENDPOINT: ${{ vars.AZURE_AI_PROJECT_ENDPOINT }}
       MODEL_DEPLOYMENT: ${{ vars.MODEL_DEPLOYMENT }}
       FOUNDRY_MODEL_DEPLOYMENT: ${{ vars.MODEL_DEPLOYMENT }}
-      LIVE_VALIDATION_AGENT_NAME: validation-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.id }}
     strategy:
       fail-fast: false
       max-parallel: 4

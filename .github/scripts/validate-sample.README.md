@@ -67,17 +67,15 @@ live_service_validation:
   required_env:
     - FOUNDRY_PROJECT_ENDPOINT
     - FOUNDRY_MODEL_DEPLOYMENT
-    - LIVE_VALIDATION_AGENT_NAME
   cleanup_resources:
     - type: foundry_agent_versions
-      name_env: LIVE_VALIDATION_AGENT_NAME
   substitutions:
     - file: run_sample.py
       replacements:
         - placeholder: "your_project_endpoint"
           env: FOUNDRY_PROJECT_ENDPOINT
         - placeholder: "your-agent-name"
-          env: LIVE_VALIDATION_AGENT_NAME
+          generate: unique_name
 ```
 
 The contract is:
@@ -105,9 +103,15 @@ The contract is:
   intentionally contain copy/paste instructional placeholders, such as
   `"your_project_endpoint"`, but the validation caller owns the real value. Each
   substitution names a file inside the sample directory and one or more
-  `placeholder` to `env` replacements. The validator requires each environment
-  variable to be non-empty, replaces every exact placeholder occurrence in the
-  workflow checkout before running the live-service command, and returns
+  replacements, each mapping a `placeholder` to exactly one of:
+  - `env`: a caller-supplied environment variable. The validator requires it to
+    be non-empty.
+  - `generate: unique_name`: a name the validator generates itself — one per
+    sample run, reused for every `generate: unique_name` replacement in that
+    sample (and by `cleanup_resources`, see below). No environment variable or
+    workflow wiring is needed for this case.
+  Every exact placeholder occurrence is replaced in the workflow checkout
+  before running the live-service command, and the validator returns
   infrastructure error (`2`) if the target file is outside the sample directory,
   missing, malformed, or does not contain the placeholder. Substitutions are
   validated and applied in memory first and written only after the whole
@@ -118,15 +122,16 @@ The contract is:
 - `live_service_validation.cleanup_resources` is optional. It declares resource
   scopes that the shared cleanup utility snapshots immediately before the live
   command and compares immediately afterward. The currently supported type is
-  `foundry_agent_versions`; its `name_env` must identify a non-empty environment
-  variable containing the agent name. Cleanup deletes the whole agent when it
-  did not exist before the command; for a pre-existing agent, it deletes only
-  versions absent from the pre-command snapshot. Agents and versions that
+  `foundry_agent_versions`, which needs no further fields: it always tracks the
+  one run-unique name the validator generates for `generate: unique_name` (see
+  above), so a sample declaring `cleanup_resources` must also wire a
+  `generate: unique_name` substitution into its source — declaring one without
+  the other is an infrastructure error, since otherwise cleanup would track a
+  name the sample never actually created. Cleanup deletes the whole agent when
+  it did not exist before the command; for a pre-existing agent, it deletes
+  only versions absent from the pre-command snapshot. Agents and versions that
   existed before the run are preserved. Cleanup failure is an infrastructure
   error rather than a successful validation with leaked resources.
-- Live-validation callers should substitute a unique per-run agent name into
-  samples that declare `foundry_agent_versions`. This isolates parallel jobs and
-  prevents one run from claiming another run's newly created version.
 - `SKIP_PROVISION` is a reserved caller input and must be set to exactly `true`
   or `false` whenever live-service validation is declared. The validator
   passes it through but never provisions resources itself. Current repository
