@@ -8,10 +8,3 @@ dependencies = [
     "openai-agents>=0.1.0",
     "debugpy",
 ]
-
-[build-system]
-requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-py-modules = ["main"]

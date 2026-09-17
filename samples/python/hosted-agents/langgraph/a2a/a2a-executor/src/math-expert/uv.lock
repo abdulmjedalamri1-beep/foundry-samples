@@ -5,7 +5,7 @@ requires-python = ">=3.13"
 [[package]]
 name = "a2a-executor"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "debugpy" },
     { name = "langchain" },

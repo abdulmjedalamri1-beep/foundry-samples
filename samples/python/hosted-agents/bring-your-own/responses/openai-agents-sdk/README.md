@@ -25,7 +25,8 @@ Authentication uses `DefaultAzureCredential` via `AIProjectClient` — the same 
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) installed outside the project virtual environment
 - A Microsoft Foundry project with a model deployment (e.g. `gpt-4o-mini`)
 - Azure CLI logged in (`az login`) or another credential supported by `DefaultAzureCredential`
 

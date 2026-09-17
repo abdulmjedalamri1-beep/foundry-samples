@@ -62,8 +62,9 @@ or the VS Code Foundry Toolkit) is listed under its option below.
 
 1. An existing Foundry project with a deployed model (or create them during setup in Option 1). The
    default deployment name is `gpt-5.4-mini`.
-2. **Python 3.10 or later.**
-3. **Environment variables:** `FOUNDRY_PROJECT_ENDPOINT` and `AZURE_AI_MODEL_DEPLOYMENT_NAME` (see
+2. **Python 3.13 or later.**
+3. **[uv](https://docs.astral.sh/uv/getting-started/installation/)** installed outside the project virtual environment.
+4. **Environment variables:** `FOUNDRY_PROJECT_ENDPOINT` and `AZURE_AI_MODEL_DEPLOYMENT_NAME` (see
    `src/harness-scaling-capabilities-responses/.env.example`).
    `FOUNDRY_TOOLBOX_MCP_SERVER_URL` is optional — set it to enable centrally-managed Foundry skills;
    when unset, the agent runs with the local file skills only.

@@ -35,6 +35,7 @@ via `previous_response_id` — no need for an in-memory session store.
 ## Prerequisites
 
 - Python 3.12+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) installed outside the project virtual environment
 - Azure OpenAI resource with a deployed model (e.g., `gpt-5.4-mini`)
 - Azure CLI login (`az login`) or other `DefaultAzureCredential` source
 

@@ -1215,7 +1215,7 @@ wheels = [
 [[package]]
 name = "openai-agents-sdk-invocations"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "azure-ai-agentserver-responses" },
     { name = "azure-identity" },

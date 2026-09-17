@@ -512,7 +512,7 @@ wheels = [
 [[package]]
 name = "echo-activity"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "azure-ai-agentserver-activity" },

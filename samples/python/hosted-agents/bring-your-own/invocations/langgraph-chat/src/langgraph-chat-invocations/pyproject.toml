@@ -11,10 +11,3 @@ dependencies = [
     "langchain-azure-ai[opentelemetry]>=1.2.3",
     "debugpy",
 ]
-
-[build-system]
-requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-py-modules = ["main"]

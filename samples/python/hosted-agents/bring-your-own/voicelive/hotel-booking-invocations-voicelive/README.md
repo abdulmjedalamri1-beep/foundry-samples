@@ -104,8 +104,9 @@ Before running this sample, ensure you have:
 1. **Azure Developer CLI (`azd`)**
 	 - [Install azd](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd) and the AI agent extension: `azd ext install azure.ai.agents`
 	 - Authenticated: `azd auth login`
-2. **Python 3.10 or later**
-	 - Verify your version: `python --version`
+2. **Python 3.12 or later**
+   - Verify your version: `python --version`
+3. **[uv](https://docs.astral.sh/uv/getting-started/installation/)** installed outside the project virtual environment
 
 ### Environment variables
 
