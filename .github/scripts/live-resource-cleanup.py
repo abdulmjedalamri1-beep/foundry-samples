@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Snapshot and remove Foundry resources created by one live-validation command."""
+"""Snapshot and remove Foundry resources created by one live-validation command.
+
+Cleanup is scoped entirely by the agent name used for the run (which the
+harness generates fresh per run, so it can't collide with pre-existing or
+concurrently-running resources). For that name, this removes:
+  - agent versions created during the run (via before/after snapshot diff)
+  - the agent itself, if it did not exist before the run
+  - any conversations associated with that agent name (via the Foundry
+    conversations API's agent_name filter) -- safe without a snapshot,
+    since an agent name that didn't exist before the run can't have
+    pre-existing conversations attached to it.
+"""
 
 from __future__ import annotations
 
@@ -153,6 +164,61 @@ def agent_exists(endpoint: str, token: str, agent_name: str) -> bool:
     return True
 
 
+def list_agent_conversations(endpoint: str, token: str, agent_name: str) -> set[str]:
+    """List conversation IDs associated with an agent name.
+
+    Conversations have no ARM identity and are scoped entirely by the
+    (guaranteed-fresh) agent name used to create them, so anything returned
+    here was necessarily created by this validation run.
+    """
+    conversation_ids: set[str] = set()
+    after = ""
+    while True:
+        query = {
+            "api-version": API_VERSION,
+            "limit": "100",
+            "order": "asc",
+            "agent_name": agent_name,
+        }
+        if after:
+            query["after"] = after
+        url = f"{endpoint}/openai/v1/conversations?{urlencode(query)}"
+        payload = request_json("GET", url, token)
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise CleanupError(
+                f"Foundry API conversation list for agent {agent_name!r} has no data array"
+            )
+        for item in data:
+            conversation_id = item.get("id") if isinstance(item, dict) else None
+            if not isinstance(conversation_id, str) or not conversation_id:
+                raise CleanupError(
+                    f"Foundry API returned an invalid conversation id for agent {agent_name!r}"
+                )
+            conversation_ids.add(conversation_id)
+        if not payload.get("has_more"):
+            return conversation_ids
+        last_id = payload.get("last_id")
+        if not isinstance(last_id, str) or not last_id or last_id == after:
+            raise CleanupError(
+                f"Foundry API conversation pagination stalled for agent {agent_name!r}"
+            )
+        after = last_id
+
+
+def delete_conversation(endpoint: str, token: str, conversation_id: str) -> None:
+    url = (
+        f"{endpoint}/openai/v1/conversations/{quote(conversation_id, safe='')}?"
+        f"{urlencode({'api-version': API_VERSION})}"
+    )
+    try:
+        request_json("DELETE", url, token)
+    except FoundryApiError as exc:
+        if exc.status == 404:
+            return
+        raise
+
+
 def take_snapshot(agent_names: list[str]) -> dict[str, Any]:
     endpoint = foundry_endpoint()
     token = access_token()
@@ -206,6 +272,15 @@ def cleanup(snapshot_path: Path) -> int:
     token = access_token()
     deleted = 0
     for agent_name, previous_state in before.items():
+        # Conversations are scoped by agent name (not by the pre/post-run
+        # snapshot), since an agent that didn't previously exist can't have
+        # pre-existing conversations. Delete these first: some Foundry
+        # deployments reject deleting an agent that still has conversations.
+        for conversation_id in list_agent_conversations(endpoint, token, agent_name):
+            delete_conversation(endpoint, token, conversation_id)
+            print(f"Deleted live-created conversation: {conversation_id} (agent {agent_name})")
+            deleted += 1
+
         exists_now = agent_exists(endpoint, token, agent_name)
         if not previous_state["exists"]:
             if exists_now:

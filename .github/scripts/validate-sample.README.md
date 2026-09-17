@@ -127,11 +127,21 @@ The contract is:
   above), so a sample declaring `cleanup_resources` must also wire a
   `generate: unique_name` substitution into its source — declaring one without
   the other is an infrastructure error, since otherwise cleanup would track a
-  name the sample never actually created. Cleanup deletes the whole agent when
-  it did not exist before the command; for a pre-existing agent, it deletes
-  only versions absent from the pre-command snapshot. Agents and versions that
-  existed before the run are preserved. Cleanup failure is an infrastructure
-  error rather than a successful validation with leaked resources.
+  name the sample never actually created. For that name, cleanup removes:
+  - the whole agent, if it did not exist before the command; for a
+    pre-existing agent, only versions absent from the pre-command snapshot.
+    Agents and versions that existed before the run are preserved.
+  - any conversations associated with that agent name, via the Foundry
+    conversations API's `agent_name` filter. This needs no separate
+    declaration or snapshot: an agent name that is fresh for this run cannot
+    have pre-existing conversations, so everything the filter returns was
+    created by this run. Samples that never create a conversation simply
+    have nothing to delete here.
+  Cleanup failure is an infrastructure error rather than a successful
+  validation with leaked resources. Any future resource kind that can be
+  scoped the same way (queryable by this run's unique agent name, with no
+  pre-existing collisions possible) can be added the same way, without a new
+  `sample.yaml` field.
 - `SKIP_PROVISION` is a reserved caller input and must be set to exactly `true`
   or `false` whenever live-service validation is declared. The validator
   passes it through but never provisions resources itself. Current repository
