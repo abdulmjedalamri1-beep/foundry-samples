@@ -1,0 +1,21 @@
+[project]
+name = "echo-activity"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "azure-ai-agentserver-activity==1.0.0b1",
+    "microsoft-agents-hosting-core",
+    "microsoft-agents-authentication-msal",
+    "microsoft-agents-activity",
+    "aiohttp>=3.9.0",
+    "azure-identity>=1.17.0",
+    "python-dotenv>=1.0.0",
+    "debugpy",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main"]

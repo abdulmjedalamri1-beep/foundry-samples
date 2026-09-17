@@ -116,15 +116,13 @@ See [`.env.example`](src/hotel-booking-python-invocations-voicelive/.env.example
 ### Install dependencies
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+uv sync --frozen
 ```
 
 ### Start the agent
 
 ```bash
-python main.py
+uv run --no-sync python main.py
 ```
 
 The service listens on `http://localhost:8088`.

@@ -33,6 +33,7 @@ services:
     language: python
     codeConfiguration:
       runtime: python_3_13
+      dependencyResolution: remote_build
       entryPoint: main.py
     uses:
       - ai-project

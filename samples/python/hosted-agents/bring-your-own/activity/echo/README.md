@@ -85,7 +85,7 @@ The Explorer panel should now show `echo-activity` as a workspace root (with its
 Press **F5** (or **Run → Start Debugging**). The launch configuration will:
 
 1. Install `agentsplayground` if not already installed (one-time, via winget).
-2. Create a `.venv` (Python 3.13) and install `requirements.txt` if not already done.
+2. Run `uv sync --frozen` in `src/echo-activity/` to create the locked Python environment.
 3. Start the agent (`main.py`) under the VS Code debugger.
 4. Launch **M365 Agents Playground** automatically once port 8088 is ready.
 

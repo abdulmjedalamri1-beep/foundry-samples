@@ -204,12 +204,7 @@ azd ai agent invoke "What skills do you have available?"
 - Install dependencies in the virtual environment:
 
   ```bash
-  # use uv to accelerate
-  pip install uv
-  uv pip install -r requirements.txt
-
-  # or pure pip
-  pip install -r requirements.txt
+   uv sync --frozen
   ```
 
 ### Run and debug the agent
