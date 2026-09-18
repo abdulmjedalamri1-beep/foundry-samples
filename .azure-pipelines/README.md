@@ -104,10 +104,8 @@ scripts.
 
 ### Migration coverage limits
 
-The initial port includes 28 behavior contracts and 45 legacy payloads for
-samples already present publicly. The `python/langgraph/responses/13-custom-store`
-contract is not included because that sample is not yet in the public base used
-by this port. Add its contract together with the sample.
+The initial port includes 29 behavior contracts and 45 legacy payloads for
+samples already present publicly.
 
 Existing `.ci-skip` and `.code-ci-skip` markers are carried over for matching
 public samples. Their per-sample reason files remain the source of truth; this
