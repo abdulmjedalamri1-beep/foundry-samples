@@ -105,6 +105,12 @@ The PR policy discovers new Python/C# hosted-agent `azure.yaml` files, excluding
 samples marked `.ci-skip`. A contract defines behavior for a cloud runner to test;
 adding it does not by itself deploy or invoke the sample.
 
+The separate [ADO cloud pipeline](../hosted-agents-samples-ci.yml) checks all
+fixture mappings and validates/plans their contracts before building its matrix.
+The credential-free [scripts self-test workflow](../../.github/workflows/scripts-selftest.yml)
+also checks the published fixtures, including orphan detection. See the
+[pipeline setup and execution boundary](../README.md) for activation requirements.
+
 ## Supported protocols
 
 The runner supports `responses` and `invocations`. Other protocols require dedicated
